@@ -17,3 +17,7 @@ endif()
 if(FORGEKV_BUILD_BENCHMARKS)
   add_subdirectory(bench)
 endif()
+
+if(FORGEKV_BUILD_FUZZERS)
+  add_subdirectory(fuzz)
+endif()

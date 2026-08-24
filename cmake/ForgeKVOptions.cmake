@@ -1,5 +1,6 @@
 option(FORGEKV_BUILD_TESTS "Build ForgeKV tests" ON)
 option(FORGEKV_BUILD_BENCHMARKS "Build ForgeKV benchmarks" ON)
+option(FORGEKV_BUILD_FUZZERS "Build Clang libFuzzer targets" OFF)
 option(FORGEKV_GLIBCXX_ASSERTIONS "Enable libstdc++ runtime assertions" OFF)
 
 set(FORGEKV_SANITIZER "none" CACHE STRING "Sanitizer: none, address, undefined, or thread")
@@ -42,4 +43,8 @@ if(NOT FORGEKV_SANITIZER STREQUAL "none")
 
   target_compile_options(forgekv_sanitizers INTERFACE ${_forgekv_sanitize_flags})
   target_link_options(forgekv_sanitizers INTERFACE ${_forgekv_sanitize_flags})
+endif()
+
+if(FORGEKV_BUILD_FUZZERS AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  message(FATAL_ERROR "FORGEKV_BUILD_FUZZERS requires Clang")
 endif()

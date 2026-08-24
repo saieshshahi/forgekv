@@ -1,0 +1,6 @@
+add_executable(forgekv_protocol_parser_fuzz
+  protocol_parser_fuzz.cpp
+)
+target_link_libraries(forgekv_protocol_parser_fuzz PRIVATE forgekv_protocol)
+target_compile_options(forgekv_protocol_parser_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+target_link_options(forgekv_protocol_parser_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)

@@ -102,6 +102,19 @@ docs/                architecture, invariants, ADRs, and formats
 CI calls the same build/test scripts shown above for debug, release, ASan,
 UBSan, and TSan configurations.
 
+The version 1 binary framing contract is documented byte-for-byte in
+[`docs/protocol.md`](docs/protocol.md). Build the optional parser fuzz target
+with Clang using:
+
+```bash
+cmake -S . -B build/fuzz -G Ninja \
+  -DCMAKE_CXX_COMPILER=clang++ \
+  -DFORGEKV_BUILD_TESTS=OFF \
+  -DFORGEKV_BUILD_BENCHMARKS=OFF \
+  -DFORGEKV_BUILD_FUZZERS=ON
+cmake --build build/fuzz
+```
+
 ## Current scope
 
 The implementation proceeds in phases. Raft is intentionally not implemented

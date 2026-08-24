@@ -26,9 +26,9 @@
 
 **Interfaces:** `std::uint32_t crc32(std::span<const std::byte>)`; `FrameHeader`, `Frame`, `Namespace`, `MessageType`, and protocol limit constants.
 
-- [ ] Write known-vector and empty-vector checksum tests and verify they fail to link.
-- [ ] Implement the table-driven IEEE CRC-32 function and pass targeted tests.
-- [ ] Add enum and limit compile-time assertions.
+- [x] Write known-vector and empty-vector checksum tests and verify they fail to link.
+- [x] Implement the table-driven IEEE CRC-32 function and pass targeted tests.
+- [x] Add enum and limit compile-time assertions.
 
 ### Task 2: Fixed-width serializer
 
@@ -36,9 +36,9 @@
 
 **Interfaces:** `SerializeResult serialize(const Frame&)`; errors distinguish invalid enum, unsupported flags, payload too large, and invalid message/namespace pairing.
 
-- [ ] Write tests for exact golden bytes, zero payload, maximum payload, request ID byte order, enum validation, and checksum.
-- [ ] Verify RED, implement bounded big-endian serialization, then verify GREEN.
-- [ ] Refactor header encode helpers without changing golden bytes.
+- [x] Write tests for exact golden bytes, zero payload, maximum payload, request ID byte order, enum validation, and checksum.
+- [x] Verify RED, implement bounded big-endian serialization, then verify GREEN.
+- [x] Refactor header encode helpers without changing golden bytes.
 
 ### Task 3: Incremental parser
 
@@ -46,16 +46,16 @@
 
 **Interfaces:** `Parser::consume(std::span<const std::byte>) -> ParseBatch`; batch contains frames, consumed-byte-independent parser state, and a terminal `ParseError` when invalid.
 
-- [ ] Write tests for one-byte chunks, randomized fragmentation, concatenated frames, zero/maximum payload, truncated state, malformed magic/version/namespace/type/length, integer boundaries, and corrupted checksum.
-- [ ] Verify the parser tests fail because the API is absent.
-- [ ] Implement a header-first state machine with a fixed 24-byte header buffer and payload allocation only after validation.
-- [ ] Pass targeted tests under normal, ASan, and UBSan builds.
+- [x] Write tests for one-byte chunks, randomized fragmentation, concatenated frames, zero/maximum payload, truncated state, malformed magic/version/namespace/type/length, integer boundaries, and corrupted checksum.
+- [x] Verify the parser tests fail because the API is absent.
+- [x] Implement a header-first state machine with a fixed 24-byte header buffer and payload allocation only after validation.
+- [x] Pass targeted tests under normal, ASan, and UBSan builds.
 
 ### Task 4: Protocol documentation, fuzzing, and benchmarks
 
 **Files:** Create `docs/protocol.md`, `fuzz/protocol_parser_fuzz.cpp`, `bench/micro/protocol_benchmark.cpp`; modify CMake lists and README.
 
-- [ ] Document every header byte, byte order, checksum coverage, namespace/type table, payload limits, parser errors, and fixed-width/varint/TLV tradeoffs.
-- [ ] Add a Clang-only opt-in libFuzzer target that feeds arbitrary chunks to `Parser`.
-- [ ] Benchmark serialization and parsing separately for 0 B, 100 B, 1 KiB, 4 KiB, and maximum payload.
-- [ ] Run full tests and benchmark smoke, `git diff --check`, commit Phase 2, and push `main`.
+- [x] Document every header byte, byte order, checksum coverage, namespace/type table, payload limits, parser errors, and fixed-width/varint/TLV tradeoffs.
+- [x] Add a Clang-only opt-in libFuzzer target that feeds arbitrary chunks to `Parser`.
+- [x] Benchmark serialization and parsing separately for 0 B, 100 B, 1 KiB, 4 KiB, and maximum payload.
+- [x] Run full tests and benchmark smoke, `git diff --check`, commit Phase 2, and push `main`.
