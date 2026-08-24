@@ -1,6 +1,6 @@
 # ForgeKV System Architecture
 
-Status: Phase 0 design baseline  
+Status: Phase 0 design baseline
 Audience: implementers, reviewers, and operators
 
 ## 1. Purpose and scope

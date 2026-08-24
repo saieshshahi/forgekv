@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Build
+        run: ./scripts/build.sh "${{ matrix.preset }}"
+      - name: Test
+        run: ctest --test-dir "build/${{ matrix.preset }}" --output-on-failure
+      - name: Benchmark smoke
+        if: matrix.preset == 'release'
+        run: ./scripts/bench.sh release --benchmark_min_time=0.01s --benchmark_repetitions=1
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, ubsan, tsan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Test sanitizer
+        run: "./scripts/test-${{ matrix.sanitizer }}.sh"
