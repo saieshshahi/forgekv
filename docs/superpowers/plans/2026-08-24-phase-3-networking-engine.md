@@ -26,8 +26,8 @@
 
 **Interfaces:** `ReactorConfig::validate()`, `ConnectionToken{id,generation}`, `Metrics::snapshot()` returning all required fixed-cardinality counters/gauges.
 
-- [ ] Write validation and monotonic metrics tests and verify RED.
-- [ ] Implement exact defaults and invariants, then pass tests.
+- [x] Write validation and monotonic metrics tests and verify RED.
+- [x] Implement exact defaults and invariants, then pass tests.
 
 ### Task 2: Bounded request executor
 
@@ -35,8 +35,8 @@
 
 **Interfaces:** `RequestExecutor(worker_count, max_items, max_bytes, Handler)`, `try_submit(Request)`, `stop()`. `Handler` returns a protocol frame and a completion callback receives connection token and frame.
 
-- [ ] Write tests for normal execution, item/byte rejection, exception-to-ERROR conversion, drain, and idempotent stop.
-- [ ] Verify RED, implement with condition variables and bounded queue, then pass under TSan.
+- [x] Write tests for normal execution, item/byte rejection, exception-to-ERROR conversion, drain, and idempotent stop.
+- [x] Verify RED, implement with condition variables and bounded queue, then pass under TSan.
 
 ### Task 3: epoll reactor and server
 
@@ -44,17 +44,17 @@
 
 **Interfaces:** `TcpServer(ReactorConfig, Handler)`, `start(bind_address, port)`, `bound_port()`, `stop()`, `metrics()`.
 
-- [ ] Write a real-socket PING round-trip integration test and verify RED.
-- [ ] Implement listener creation, epoll/eventfd loop, accept, input parsing, dispatch, completion wakeup, and ordered output.
-- [ ] Add failing tests then implementations for fragmented frames, multiple frames/read, partial/slow reads, peer shutdown, reconnect, and clean stop.
-- [ ] Add failing saturation tests then implement input/output/in-flight/global backpressure and BUSY/close policies.
-- [ ] Assert required metrics in integration tests and run TSan.
+- [x] Write a real-socket PING round-trip integration test and verify RED.
+- [x] Implement listener creation, epoll/eventfd loop, accept, input parsing, dispatch, completion wakeup, and ordered output.
+- [x] Add failing tests then implementations for fragmented frames, multiple frames/read, partial/slow reads, peer shutdown, reconnect, and clean stop.
+- [x] Add failing saturation tests then implement input/output/in-flight/global backpressure and BUSY/close policies.
+- [x] Assert required metrics in integration tests and run TSan.
 
 ### Task 4: Load generator and operational documentation
 
 **Files:** Create `bench/client/load_generator.cpp`; modify CMake, README, and `docs/adr/0002-networking-model.md` only for concrete defaults/results.
 
-- [ ] Add CLI options for host, port, concurrency, persistent/reconnect mode, pipeline depth, operation count, key bytes, and value bytes.
-- [ ] Use the protocol serializer/parser and report operations/sec, bytes/sec, errors, and latency percentiles.
-- [ ] Start a local PING server fixture, run smoke and bounded-load tests, and record measured host/environment output without claiming general capacity.
-- [ ] Run full tests, sanitizer suites, `git diff --check`, commit Phase 3, and push `main`.
+- [x] Add CLI options for host, port, concurrency, persistent/reconnect mode, pipeline depth, operation count, key bytes, and value bytes.
+- [x] Use the protocol serializer/parser and report operations/sec, bytes/sec, errors, and latency percentiles.
+- [x] Start a local PING server fixture, run smoke and bounded-load tests, and record measured host/environment output without claiming general capacity.
+- [x] Run full tests, sanitizer suites, `git diff --check`, commit Phase 3, and push `main`.

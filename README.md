@@ -61,9 +61,10 @@ The configured build targets are:
 
 ASan, UBSan, and TSan use separate build directories and are not combined.
 Sanitizer runtime support depends on the Linux kernel/toolchain combination; CI
-on Ubuntu is the authoritative baseline. On WSL2, `test-tsan.sh` disables
-address-space randomization for the test process to avoid GCC TSan shadow-memory
-collisions. Debug builds enable
+on Ubuntu is the authoritative baseline. On WSL2, install `clang` for TSan;
+`test-tsan.sh` uses Clang and disables address-space randomization for the test
+process to avoid WSL shadow-memory collisions. Native Ubuntu CI uses GCC TSan.
+Debug builds enable
 `_GLIBCXX_ASSERTIONS` by default. It can be set explicitly with:
 
 ```bash
@@ -114,6 +115,19 @@ cmake -S . -B build/fuzz -G Ninja \
   -DFORGEKV_BUILD_FUZZERS=ON
 cmake --build build/fuzz
 ```
+
+Run the Phase 3 networking load generator against an in-process epoll server by
+leaving `port` at zero:
+
+```bash
+./scripts/build.sh release
+./build/release/bench/forgekv_load_generator \
+  --port=0 --concurrency=4 --pipeline=16 --requests=10000 \
+  --key-size=16 --value-size=100 --persistent=1
+```
+
+Set `--host` and a nonzero `--port` to target an external server. Output reports
+operations/sec, bytes/sec, errors, and p50/p95/p99/maximum response latency.
 
 ## Current scope
 

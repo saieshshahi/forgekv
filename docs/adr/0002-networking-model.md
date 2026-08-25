@@ -154,3 +154,19 @@ writes, peer half-close, reconnect, slow readers, slow senders, queue saturation
 and file-descriptor reuse. Metrics must expose active connections, accepted and
 closed totals, bytes read/written, buffer bytes, requests in flight, reactor-loop
 delay, and backpressured connections.
+
+## Phase 3 implementation baseline
+
+The first implementation uses these defaults: one level-triggered reactor,
+four request workers, 64 in-flight requests per connection, 4,096 globally
+outstanding requests, one maximum frame of buffered input per connection, four
+maximum frames of buffered output per connection, and 256 KiB read/write work
+budgets per readiness event. Worker completions wake the reactor through
+`eventfd`; connection ID plus generation rejects late completions.
+
+On 2026-08-24, the release load-generator smoke run under WSL2 used four
+persistent connections, pipeline depth 16, 10,000 PING requests, 16-byte keys,
+and 100-byte values. It completed without errors at approximately 14,195
+operations/second and 3.97 MB/second, with p50 3.93 ms, p95 7.30 ms, p99 8.45
+ms, and maximum 9.31 ms. This is a development-host baseline, not a capacity
+claim; storage and Raft were absent.
