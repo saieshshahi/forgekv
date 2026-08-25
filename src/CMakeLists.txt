@@ -22,3 +22,11 @@ add_library(forgekv_net STATIC
 )
 target_link_libraries(forgekv_net PUBLIC forgekv_protocol Threads::Threads)
 target_include_directories(forgekv_net PUBLIC "${PROJECT_SOURCE_DIR}/src")
+
+add_library(forgekv_storage STATIC
+  storage/kv_store.cpp
+  storage/wal.cpp
+  storage/wal_record.cpp
+)
+target_link_libraries(forgekv_storage PUBLIC forgekv_protocol Threads::Threads)
+target_include_directories(forgekv_storage PUBLIC "${PROJECT_SOURCE_DIR}/src")

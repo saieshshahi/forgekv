@@ -129,6 +129,19 @@ leaving `port` at zero:
 Set `--host` and a nonzero `--port` to target an external server. Output reports
 operations/sec, bytes/sec, errors, and p50/p95/p99/maximum response latency.
 
+## Standalone storage benchmark
+
+Phase 4 adds a checksummed append-only WAL and in-memory KV engine with ASYNC,
+SYNC, and bounded GROUP_COMMIT modes. The byte format and recovery behavior are
+documented in [`docs/storage.md`](docs/storage.md).
+
+```bash
+./build/release/bench/forgekv_benchmarks --benchmark_filter=Storage
+```
+
+The matrix covers PUT, GET, DELETE, and recovery across supported value sizes
+and reports throughput, tail latency, byte rate, and process CPU utilization.
+
 ## Current scope
 
 The implementation proceeds in phases. Raft is intentionally not implemented

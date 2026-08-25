@@ -26,8 +26,8 @@
 
 **Interfaces:** `WalRecord{lsn, operation, key, value}`, `encode_record`, `decode_record`, and `DecodeStatus{complete,incomplete,corrupt}`.
 
-- [ ] Write golden-byte tests for PUT/DELETE and rejection tests for lengths, enums, overflow, checksum, and truncation.
-- [ ] Verify RED, implement fixed-width little-independent encoding using explicit byte order, and pass tests.
+- [x] Write golden-byte tests for PUT/DELETE and rejection tests for lengths, enums, overflow, checksum, and truncation.
+- [x] Verify RED, implement fixed-width little-independent encoding using explicit byte order, and pass tests.
 
 ### Task 2: WAL append and recovery
 
@@ -35,10 +35,10 @@
 
 **Interfaces:** `Wal::open(path)`, `append(record)`, `sync()`, `recover(callback)`, `durable_lsn()`, and typed storage errors.
 
-- [ ] Write tests for empty WAL, normal replay, reopen replay, monotonic LSNs, duplicate/out-of-order LSN rejection, and binary keys/values.
-- [ ] Verify RED, implement EINTR-safe partial write/read loops and explicit `fdatasync`.
-- [ ] Add deterministic tests for every truncation offset in header/payload/checksum and implement final-tail truncation.
-- [ ] Add checksum/structural corruption tests and implement fail-closed recovery.
+- [x] Write tests for empty WAL, normal replay, reopen replay, monotonic LSNs, duplicate/out-of-order LSN rejection, and binary keys/values.
+- [x] Verify RED, implement EINTR-safe partial write/read loops and explicit `fdatasync`.
+- [x] Add deterministic tests for every truncation offset in header/payload/checksum and implement final-tail truncation.
+- [x] Add checksum/structural corruption tests and implement fail-closed recovery.
 
 ### Task 3: KV engine and durability modes
 
@@ -46,18 +46,18 @@
 
 **Interfaces:** `DurabilityMode{async,sync,group_commit}`, `StorageOptions`, `KvStore::open`, `put`, `get`, `erase`, `close`, and `last_lsn`.
 
-- [ ] Write tests for overwrite, missing GET/DELETE, bounds, ordered persistence, restart recovery, and idempotent close; verify RED.
-- [ ] Implement the single writer and shared-read state machine for ASYNC and SYNC.
-- [ ] Write concurrent batching tests using an injectable flush observer; verify RED.
-- [ ] Implement GROUP_COMMIT knobs `max_batch_entries`, `max_batch_bytes`, and `max_batch_wait_us`, with one flush and ordered application per batch.
-- [ ] Run concurrency tests under TSan and recovery tests under ASan/UBSan.
+- [x] Write tests for overwrite, missing GET/DELETE, bounds, ordered persistence, restart recovery, and idempotent close; verify RED.
+- [x] Implement the single writer and shared-read state machine for ASYNC and SYNC.
+- [x] Write concurrent batching tests using an injectable flush observer; verify RED.
+- [x] Implement GROUP_COMMIT knobs `max_batch_entries`, `max_batch_bytes`, and `max_batch_wait_us`, with one flush and ordered application per batch.
+- [x] Run concurrency tests under TSan and recovery tests under ASan/UBSan.
 
 ### Task 4: Failure harness, benchmarks, and documentation
 
 **Files:** Create `tests/failure/storage_crash_helper.cpp`, `tests/failure/storage_crash_test.cpp`, `bench/micro/storage_benchmark.cpp`, `docs/storage.md`; modify CMake and README.
 
-- [ ] Add subprocess kill tests around append and sync boundaries where deterministic hooks are possible; verify only fully valid records recover.
-- [ ] Benchmark PUT/GET/DELETE and recovery for 100 B, 1 KiB, 4 KiB, 64 KiB, and 1 MiB values over varying key counts.
-- [ ] Report ops/sec, bytes/sec, p50, p95, p99, maximum latency, and process CPU utilization as benchmark counters.
-- [ ] Document record bytes, recovery policy, all durability modes, batching knobs, and the throughput/latency tradeoff.
-- [ ] Run clean full builds, all tests and sanitizers, benchmark smoke, `git diff --check`, commit Phase 4, and push `main`.
+- [x] Add subprocess kill tests around append and sync boundaries where deterministic hooks are possible; verify only fully valid records recover.
+- [x] Benchmark PUT/GET/DELETE and recovery for 100 B, 1 KiB, 4 KiB, 64 KiB, and 1 MiB values over varying key counts.
+- [x] Report ops/sec, bytes/sec, p50, p95, p99, maximum latency, and process CPU utilization as benchmark counters.
+- [x] Document record bytes, recovery policy, all durability modes, batching knobs, and the throughput/latency tradeoff.
+- [x] Run clean full builds, all tests and sanitizers, benchmark smoke, `git diff --check`, commit Phase 4, and push `main`.
