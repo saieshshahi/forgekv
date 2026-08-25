@@ -48,6 +48,9 @@ rm -rf build/debug
 The configured build targets are:
 
 - `forgekv_common`: shared, narrowly scoped primitives such as logging;
+- `forgekv_raft`: deterministic, transport-independent Raft core;
+- `forgekv_sim` and `forgekv_raft_sim`: deterministic cluster simulator library
+  and seeded stress runner;
 - `forgekv_unit_tests`: GoogleTest unit test executable; and
 - `forgekv_benchmarks`: Google Benchmark executable.
 
@@ -144,6 +147,9 @@ and reports throughput, tail latency, byte rate, and process CPU utilization.
 
 ## Current scope
 
-The implementation proceeds in phases. Raft is intentionally not implemented
-in the engineering, protocol, networking, or standalone-storage phases. See
-[`docs/architecture.md`](docs/architecture.md) for the complete target system.
+The implementation proceeds in phases. The pure Raft core and deterministic
+fault simulator are implemented, but are not yet connected to production disk
+or network paths. See [`docs/raft.md`](docs/raft.md),
+[`docs/raft-simulator.md`](docs/raft-simulator.md), and
+[`docs/architecture.md`](docs/architecture.md) for the current and target
+systems.

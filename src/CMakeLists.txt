@@ -36,3 +36,14 @@ add_library(forgekv_raft STATIC
 )
 target_link_libraries(forgekv_raft PUBLIC forgekv_common)
 target_include_directories(forgekv_raft PUBLIC "${PROJECT_SOURCE_DIR}/src")
+
+add_library(forgekv_sim STATIC
+  sim/raft_simulator.cpp
+)
+target_link_libraries(forgekv_sim PUBLIC forgekv_raft)
+target_include_directories(forgekv_sim PUBLIC "${PROJECT_SOURCE_DIR}/src")
+
+add_executable(forgekv_raft_sim
+  sim/raft_sim_main.cpp
+)
+target_link_libraries(forgekv_raft_sim PRIVATE forgekv_sim)

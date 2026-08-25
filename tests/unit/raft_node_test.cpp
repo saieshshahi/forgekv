@@ -93,6 +93,49 @@ TEST(RaftNodeConfig, RejectsInvalidMembershipAndTiming) {
   EXPECT_THROW(RaftNode node(heartbeat_too_slow), std::invalid_argument);
 }
 
+TEST(RaftNodeRecovery, RestoresPersistentStateAtRestartLogicalTime) {
+  const RaftPersistentState persistent{
+      .current_term = 7,
+      .voted_for = 2,
+      .log = {entry(1, 4, 0x41), entry(2, 7, 0x72)},
+  };
+  RaftNode node(config(), persistent, 1'000);
+  const auto state = node.snapshot();
+
+  EXPECT_EQ(state.role, Role::follower);
+  EXPECT_EQ(state.current_term, 7U);
+  EXPECT_EQ(state.voted_for, 2U);
+  EXPECT_EQ(state.log, persistent.log);
+  EXPECT_EQ(state.commit_index, 0U);
+  EXPECT_EQ(state.last_applied, 0U);
+  EXPECT_EQ(state.now, 1'000U);
+  EXPECT_GE(state.election_deadline, 1'150U);
+  EXPECT_LE(state.election_deadline, 1'300U);
+}
+
+TEST(RaftNodeRecovery, RejectsInvalidPersistentState) {
+  auto persistent = RaftPersistentState{
+      .current_term = 2,
+      .voted_for = 99,
+      .log = {},
+  };
+  EXPECT_THROW(RaftNode node(config(), persistent, 0), std::invalid_argument);
+
+  persistent.voted_for.reset();
+  persistent.log = {entry(2, 2, 0x22)};
+  EXPECT_THROW(RaftNode node(config(), persistent, 0), std::invalid_argument);
+
+  persistent.log = {entry(1, 3, 0x31)};
+  EXPECT_THROW(RaftNode node(config(), persistent, 0), std::invalid_argument);
+
+  persistent = RaftPersistentState{
+      .current_term = 0,
+      .voted_for = 1,
+      .log = {},
+  };
+  EXPECT_THROW(RaftNode node(config(), persistent, 0), std::invalid_argument);
+}
+
 TEST(RaftElection, LogicalTimeoutStartsElectionWithPersistenceBeforeMessages) {
   RaftNode node(config());
   const auto initial = node.snapshot();

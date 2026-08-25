@@ -11,6 +11,8 @@ namespace forgekv::raft {
 class RaftNode final {
  public:
   explicit RaftNode(RaftConfig config);
+  RaftNode(RaftConfig config, RaftPersistentState persistent_state,
+           LogicalTime initial_time);
   ~RaftNode();
 
   RaftNode(RaftNode&&) noexcept;

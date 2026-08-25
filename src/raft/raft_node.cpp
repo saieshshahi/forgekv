@@ -1,6 +1,7 @@
 #include "raft/raft_node.h"
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <stdexcept>
@@ -43,20 +44,49 @@ LogicalTime saturating_add(const LogicalTime left, const LogicalTime right) {
   return left + right;
 }
 
+void validate_persistent_state(const RaftConfig& config,
+                               const RaftPersistentState& persistent) {
+  if (persistent.current_term == 0 && persistent.voted_for.has_value()) {
+    throw std::invalid_argument("term-zero persistent state cannot have a vote");
+  }
+  if (persistent.voted_for.has_value() &&
+      std::ranges::find(config.voters, *persistent.voted_for) ==
+          config.voters.end()) {
+    throw std::invalid_argument("persistent Raft vote refers to a non-voter");
+  }
+  Term previous_term = 0;
+  LogIndex expected_index = 1;
+  for (const auto& entry : persistent.log) {
+    if (entry.index != expected_index || entry.term == 0 ||
+        entry.term < previous_term || entry.term > persistent.current_term) {
+      throw std::invalid_argument("persistent Raft log is invalid");
+    }
+    ++expected_index;
+    previous_term = entry.term;
+  }
+}
+
 }  // namespace
 
 struct RaftNode::Impl final {
-  explicit Impl(RaftConfig value)
+  Impl(RaftConfig value, RaftPersistentState persistent,
+       const LogicalTime initial_time)
       : config(std::move(value)),
+        current_term(persistent.current_term),
+        voted_for(persistent.voted_for),
+        now(initial_time),
         random(config.random_seed ^
                (config.self_id * 0x9E3779B97F4A7C15ULL)) {
     validate_config(config);
+    validate_persistent_state(config, persistent);
     log.push_back(LogEntry{
         .index = 0,
         .term = 0,
         .kind = EntryKind::no_op,
         .command = {},
     });
+    log.insert(log.end(), std::make_move_iterator(persistent.log.begin()),
+               std::make_move_iterator(persistent.log.end()));
     reset_election_deadline();
     verify_invariants();
   }
@@ -544,7 +574,12 @@ struct RaftNode::Impl final {
 };
 
 RaftNode::RaftNode(RaftConfig config)
-    : impl_(std::make_unique<Impl>(std::move(config))) {}
+    : RaftNode(std::move(config), RaftPersistentState{}, 0) {}
+
+RaftNode::RaftNode(RaftConfig config, RaftPersistentState persistent_state,
+                   const LogicalTime initial_time)
+    : impl_(std::make_unique<Impl>(std::move(config),
+                                   std::move(persistent_state), initial_time)) {}
 
 RaftNode::~RaftNode() = default;
 RaftNode::RaftNode(RaftNode&&) noexcept = default;

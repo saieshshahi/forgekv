@@ -147,6 +147,12 @@ struct RaftConfig final {
   std::uint64_t random_seed{};
 };
 
+struct RaftPersistentState final {
+  Term current_term{};
+  std::optional<NodeId> voted_for;
+  std::vector<LogEntry> log;
+};
+
 struct RaftSnapshot final {
   NodeId self_id{};
   Role role{Role::follower};
