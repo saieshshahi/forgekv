@@ -3,8 +3,10 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace forgekv::protocol {
 namespace {
@@ -19,6 +21,30 @@ TEST(Checksum, EmptyInputUsesStandardCrc32Value) {
 
 TEST(Checksum, MatchesStandardNineDigitVector) {
   EXPECT_EQ(crc32(as_bytes("123456789")), 0xCBF43926U);
+}
+
+TEST(Checksum, MatchesAllByteValuesVector) {
+  std::vector<std::byte> bytes;
+  bytes.reserve(256);
+  for (std::uint16_t value = 0; value < 256; ++value) {
+    bytes.push_back(static_cast<std::byte>(value));
+  }
+
+  EXPECT_EQ(crc32(bytes), 0x29058C73U);
+}
+
+TEST(Checksum, IncrementalUpdatesMatchSingleUpdateAcrossEveryBoundary) {
+  constexpr std::string_view input =
+      "slicing by eight must preserve incremental CRC32 semantics";
+  const auto bytes = as_bytes(input);
+  const auto expected = crc32(bytes);
+
+  for (std::size_t split = 0; split <= bytes.size(); ++split) {
+    Crc32 checksum;
+    checksum.update(bytes.first(split));
+    checksum.update(bytes.subspan(split));
+    EXPECT_EQ(checksum.value(), expected) << "split=" << split;
+  }
 }
 
 }  // namespace

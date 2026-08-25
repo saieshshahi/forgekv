@@ -1,0 +1,622 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="294" onload="init(evt)" viewBox="0 0 1200 294" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="294.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >ForgeKV recovery</text>
+<text id="details" x="10.00" y="277" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="277" > </text>
+<g id="frames">
+<g >
+<title>forgekv::storage::KvStore::Impl::submit (5,025,125 samples, 0.08%)</title><rect x="1183.1" y="101" width="1.0" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1186.06" y="111.5" ></text>
+</g>
+<g >
+<title>__memcpy_avx_unaligned_erms (10,050,250 samples, 0.17%)</title><rect x="119.0" y="117" width="2.0" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="121.98" y="127.5" ></text>
+</g>
+<g >
+<title>forgekv::storage::encode_record (522,613,000 samples, 8.73%)</title><rect x="10.0" y="117" width="103.0" height="15.0" fill="rgb(231,121,29)" rx="2" ry="2" />
+<text  x="13.00" y="127.5" >forgekv::sto..</text>
+</g>
+<g >
+<title>benchmark::internal::(anonymous namespace)::RunBenchmarks (5,422,109,875 samples, 90.60%)</title><rect x="121.0" y="213" width="1069.0" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="123.97" y="223.5" >benchmark::internal::(anonymous namespace)::RunBenchmarks</text>
+</g>
+<g >
+<title>forgekv::storage::Wal::recover (2,678,391,625 samples, 44.75%)</title><rect x="121.0" y="85" width="528.0" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="123.97" y="95.5" >forgekv::storage::Wal::recover</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::~_State_baseV2 (5,025,125 samples, 0.08%)</title><rect x="1183.1" y="69" width="1.0" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="1186.06" y="79.5" ></text>
+</g>
+<g >
+<title>forgekv::storage::decode_record (2,618,090,125 samples, 43.74%)</title><rect x="132.9" y="69" width="516.1" height="15.0" fill="rgb(246,188,45)" rx="2" ry="2" />
+<text  x="135.85" y="79.5" >forgekv::storage::decode_record</text>
+</g>
+<g >
+<title>__memcpy_avx_unaligned_erms (100,502,500 samples, 1.68%)</title><rect x="1130.6" y="53" width="19.8" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="1133.55" y="63.5" ></text>
+</g>
+<g >
+<title>benchmark::internal::BenchmarkInstance::Run (5,422,109,875 samples, 90.60%)</title><rect x="121.0" y="149" width="1069.0" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="123.97" y="159.5" >benchmark::internal::BenchmarkInstance::Run</text>
+</g>
+<g >
+<title>benchmark::internal::BenchmarkRunner::DoNIterations (5,422,109,875 samples, 90.60%)</title><rect x="121.0" y="181" width="1069.0" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="123.97" y="191.5" >benchmark::internal::BenchmarkRunner::DoNIterations</text>
+</g>
+<g >
+<title>benchmark::internal::BenchmarkRunner::DoOneRepetition (5,422,109,875 samples, 90.60%)</title><rect x="121.0" y="197" width="1069.0" height="15.0" fill="rgb(212,33,8)" rx="2" ry="2" />
+<text  x="123.97" y="207.5" >benchmark::internal::BenchmarkRunner::DoOneRepetition</text>
+</g>
+<g >
+<title>forgekv::storage::Wal::recover (2,708,542,375 samples, 45.26%)</title><rect x="649.0" y="101" width="534.1" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="652.04" y="111.5" >forgekv::storage::Wal::recover</text>
+</g>
+<g >
+<title>forgekv::protocol::Crc32::update (2,396,984,625 samples, 40.05%)</title><rect x="658.0" y="69" width="472.6" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="660.96" y="79.5" >forgekv::protocol::Crc32::update</text>
+</g>
+<g >
+<title>__libc_pread64 (5,025,125 samples, 0.08%)</title><rect x="131.9" y="53" width="1.0" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="134.86" y="63.5" ></text>
+</g>
+<g >
+<title>forgekv::storage::Wal::append (522,613,000 samples, 8.73%)</title><rect x="10.0" y="133" width="103.0" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="13.00" y="143.5" >forgekv::sto..</text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char*&gt; (30,150,750 samples, 0.50%)</title><rect x="1184.1" y="117" width="5.9" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="1187.06" y="127.5" ></text>
+</g>
+<g >
+<title>forgekv::protocol::Crc32::update (492,462,250 samples, 8.23%)</title><rect x="15.9" y="101" width="97.1" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="18.94" y="111.5" >forgekv::pr..</text>
+</g>
+<g >
+<title>start_thread (562,814,000 samples, 9.40%)</title><rect x="10.0" y="197" width="111.0" height="15.0" fill="rgb(212,34,8)" rx="2" ry="2" />
+<text  x="13.00" y="207.5" >start_thread</text>
+</g>
+<g >
+<title>std::__future_base::_Result&lt;forgekv::storage::(anonymous namespace)::MutationResult&gt;::_M_destroy (5,025,125 samples, 0.08%)</title><rect x="1183.1" y="53" width="1.0" height="15.0" fill="rgb(233,128,30)" rx="2" ry="2" />
+<text  x="1186.06" y="63.5" ></text>
+</g>
+<g >
+<title>__memcpy_avx_unaligned_erms (30,150,750 samples, 0.50%)</title><rect x="113.0" y="117" width="6.0" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="116.04" y="127.5" ></text>
+</g>
+<g >
+<title>forgekv::storage::KvStore::Impl::process_batch (562,814,000 samples, 9.40%)</title><rect x="10.0" y="149" width="111.0" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="13.00" y="159.5" >forgekv::stor..</text>
+</g>
+<g >
+<title>__memcpy_avx_unaligned_erms (30,150,750 samples, 0.50%)</title><rect x="1184.1" y="101" width="5.9" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="1187.06" y="111.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (165,829,125 samples, 2.77%)</title><rect x="1150.4" y="85" width="32.7" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="1153.37" y="95.5" >st..</text>
+</g>
+<g >
+<title>forgekv::storage::KvStore::open (5,386,934,000 samples, 90.01%)</title><rect x="121.0" y="117" width="1062.1" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="123.97" y="127.5" >forgekv::storage::KvStore::open</text>
+</g>
+<g >
+<title>forgekv::storage::Wal::open (2,678,391,625 samples, 44.75%)</title><rect x="121.0" y="101" width="528.0" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="123.97" y="111.5" >forgekv::storage::Wal::open</text>
+</g>
+<g >
+<title>forgekv::storage::KvStore::Impl::writer_loop (562,814,000 samples, 9.40%)</title><rect x="10.0" y="165" width="111.0" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="13.00" y="175.5" >forgekv::stor..</text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char const*&gt; (100,502,500 samples, 1.68%)</title><rect x="1130.6" y="69" width="19.8" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="1133.55" y="79.5" ></text>
+</g>
+<g >
+<title>benchmark::internal::(anonymous namespace)::RunInThread (5,422,109,875 samples, 90.60%)</title><rect x="121.0" y="165" width="1069.0" height="15.0" fill="rgb(208,15,3)" rx="2" ry="2" />
+<text  x="123.97" y="175.5" >benchmark::internal::(anonymous namespace)::RunInThread</text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (55,276,375 samples, 0.92%)</title><rect x="121.0" y="69" width="10.9" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="123.97" y="79.5" ></text>
+</g>
+<g >
+<title>__memcpy_avx_unaligned_erms (165,829,125 samples, 2.77%)</title><rect x="1150.4" y="69" width="32.7" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="1153.37" y="79.5" >__..</text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char*&gt; (10,050,250 samples, 0.17%)</title><rect x="119.0" y="133" width="2.0" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="121.98" y="143.5" ></text>
+</g>
+<g >
+<title>all (5,984,923,875 samples, 100%)</title><rect x="10.0" y="245" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="255.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;forgekv::storage::(anonymous namespace)::PendingMutation, std::allocator&lt;forgekv::storage::(anonymous namespace)::PendingMutation&gt;,  (5,025,125 samples, 0.08%)</title><rect x="1183.1" y="85" width="1.0" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="1186.06" y="95.5" ></text>
+</g>
+<g >
+<title>forgekv::protocol::Crc32::update (2,442,210,750 samples, 40.81%)</title><rect x="132.9" y="53" width="481.5" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="135.85" y="63.5" >forgekv::protocol::Crc32::update</text>
+</g>
+<g >
+<title>forgekv_benchma (5,984,923,875 samples, 100.00%)</title><rect x="10.0" y="229" width="1180.0" height="15.0" fill="rgb(227,105,25)" rx="2" ry="2" />
+<text  x="13.00" y="239.5" >forgekv_benchma</text>
+</g>
+<g >
+<title>__memcpy_avx_unaligned_erms (175,879,375 samples, 2.94%)</title><rect x="614.4" y="37" width="34.6" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="617.37" y="47.5" >__..</text>
+</g>
+<g >
+<title>__clone3 (562,814,000 samples, 9.40%)</title><rect x="10.0" y="213" width="111.0" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="13.00" y="223.5" >__clone3</text>
+</g>
+<g >
+<title>forgekv::storage::KvStore::put (5,025,125 samples, 0.08%)</title><rect x="1183.1" y="117" width="1.0" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="1186.06" y="127.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_assign (30,150,750 samples, 0.50%)</title><rect x="113.0" y="133" width="6.0" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="116.04" y="143.5" ></text>
+</g>
+<g >
+<title>forgekv::storage::(anonymous namespace)::read_at (5,025,125 samples, 0.08%)</title><rect x="131.9" y="69" width="1.0" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="134.86" y="79.5" ></text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (40,201,000 samples, 0.67%)</title><rect x="649.0" y="85" width="8.0" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="652.04" y="95.5" ></text>
+</g>
+<g >
+<title>forgekv::storage::decode_record (2,502,512,250 samples, 41.81%)</title><rect x="657.0" y="85" width="493.4" height="15.0" fill="rgb(246,188,45)" rx="2" ry="2" />
+<text  x="659.97" y="95.5" >forgekv::storage::decode_record</text>
+</g>
+<g >
+<title>__libc_pread64 (5,025,125 samples, 0.08%)</title><rect x="131.9" y="37" width="1.0" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="134.86" y="47.5" ></text>
+</g>
+<g >
+<title>forgekv::storage::(anonymous namespace)::StorageRecovery (5,422,109,875 samples, 90.60%)</title><rect x="121.0" y="133" width="1069.0" height="15.0" fill="rgb(211,30,7)" rx="2" ry="2" />
+<text  x="123.97" y="143.5" >forgekv::storage::(anonymous namespace)::StorageRecovery</text>
+</g>
+<g >
+<title>void std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;char const*&gt; (175,879,375 samples, 2.94%)</title><rect x="614.4" y="53" width="34.6" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="617.37" y="63.5" >vo..</text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (10,050,250 samples, 0.17%)</title><rect x="14.0" y="101" width="1.9" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="16.96" y="111.5" ></text>
+</g>
+<g >
+<title>[libstdc++.so.6.0.30] (562,814,000 samples, 9.40%)</title><rect x="10.0" y="181" width="111.0" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="13.00" y="191.5" >[libstdc++.so..</text>
+</g>
+</g>
+</svg>
