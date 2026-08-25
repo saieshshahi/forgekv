@@ -30,3 +30,9 @@ add_library(forgekv_storage STATIC
 )
 target_link_libraries(forgekv_storage PUBLIC forgekv_protocol Threads::Threads)
 target_include_directories(forgekv_storage PUBLIC "${PROJECT_SOURCE_DIR}/src")
+
+add_library(forgekv_raft STATIC
+  raft/raft_node.cpp
+)
+target_link_libraries(forgekv_raft PUBLIC forgekv_common)
+target_include_directories(forgekv_raft PUBLIC "${PROJECT_SOURCE_DIR}/src")

@@ -7,6 +7,7 @@ add_executable(forgekv_unit_tests
   unit/net_config_test.cpp
   unit/net_metrics_test.cpp
   unit/parser_test.cpp
+  unit/raft_node_test.cpp
   unit/request_executor_test.cpp
   unit/serializer_test.cpp
   unit/smoke_test.cpp
@@ -17,6 +18,7 @@ target_link_libraries(forgekv_unit_tests PRIVATE
   forgekv_common
   forgekv_net
   forgekv_protocol
+  forgekv_raft
   forgekv_storage
   GTest::gtest_main
 )
