@@ -7,7 +7,9 @@ add_executable(forgekv_unit_tests
   unit/net_config_test.cpp
   unit/net_metrics_test.cpp
   unit/parser_test.cpp
+  unit/persisted_raft_node_test.cpp
   unit/raft_node_test.cpp
+  unit/raft_storage_test.cpp
   unit/raft_simulator_test.cpp
   unit/request_executor_test.cpp
   unit/serializer_test.cpp
@@ -40,10 +42,12 @@ target_link_libraries(forgekv_integration_tests PRIVATE
 gtest_discover_tests(forgekv_integration_tests DISCOVERY_MODE PRE_TEST)
 
 add_executable(forgekv_failure_tests
+  failure/raft_persistence_crash_test.cpp
   failure/storage_crash_test.cpp
   failure/wal_recovery_test.cpp
 )
 target_link_libraries(forgekv_failure_tests PRIVATE
+  forgekv_raft
   forgekv_storage
   GTest::gtest_main
 )
@@ -58,6 +62,15 @@ target_compile_definitions(forgekv_failure_tests PRIVATE
   FORGEKV_CRASH_HELPER_PATH="$<TARGET_FILE:forgekv_storage_crash_helper>"
 )
 add_dependencies(forgekv_failure_tests forgekv_storage_crash_helper)
+
+add_executable(forgekv_raft_crash_helper
+  failure/raft_persistence_crash_helper.cpp
+)
+target_link_libraries(forgekv_raft_crash_helper PRIVATE forgekv_raft)
+target_compile_definitions(forgekv_failure_tests PRIVATE
+  FORGEKV_RAFT_CRASH_HELPER_PATH="$<TARGET_FILE:forgekv_raft_crash_helper>"
+)
+add_dependencies(forgekv_failure_tests forgekv_raft_crash_helper)
 
 add_test(
   NAME RaftSimulatorCliSmoke

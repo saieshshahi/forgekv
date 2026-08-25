@@ -32,9 +32,11 @@ target_link_libraries(forgekv_storage PUBLIC forgekv_protocol Threads::Threads)
 target_include_directories(forgekv_storage PUBLIC "${PROJECT_SOURCE_DIR}/src")
 
 add_library(forgekv_raft STATIC
+  raft/persisted_raft_node.cpp
   raft/raft_node.cpp
+  raft/raft_storage.cpp
 )
-target_link_libraries(forgekv_raft PUBLIC forgekv_common)
+target_link_libraries(forgekv_raft PUBLIC forgekv_common forgekv_protocol)
 target_include_directories(forgekv_raft PUBLIC "${PROJECT_SOURCE_DIR}/src")
 
 add_library(forgekv_sim STATIC

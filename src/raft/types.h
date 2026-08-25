@@ -140,6 +140,7 @@ struct PeerProgress final {
 
 struct RaftConfig final {
   NodeId self_id{};
+  std::uint64_t cluster_id{1};
   std::vector<NodeId> voters;
   LogicalTime election_timeout_min{};
   LogicalTime election_timeout_max{};

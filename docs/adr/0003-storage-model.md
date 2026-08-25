@@ -167,6 +167,17 @@ testing. The in-memory state machine limits dataset size and snapshot copying ca
 cause latency and memory spikes. Those are accepted initial constraints and are
 top-level measured risks, not hidden implementation details.
 
+## Implementation staging note
+
+Phase 8 implements atomically published hard-state generations with cluster and
+node identity, but begins log durability with one checksummed append-only suffix
+journal. Each record has an independently checksummed fixed header so recovery
+validates its length before treating a short final record as a torn append. This
+deliberately keeps the first persistence/response ordering implementation
+auditable. Phase 11 must add
+the segmented journal, manifest generations, snapshots, and compaction described
+by this ADR before the log can be considered operationally bounded.
+
 ## Required evidence
 
 Tests must inject crashes before and after every write, flush, rename, manifest
