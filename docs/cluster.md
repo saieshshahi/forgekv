@@ -78,8 +78,15 @@ Repeat for node IDs 2 and 3 with their matching local ports and directories.
 The process prints `READY` only after storage recovery, the Raft owner, and both
 listeners are available.
 
+For deterministic partition testing, `SIGUSR1` toggles all peer traffic for that
+process while leaving its client listener live. This is a fault-injection switch,
+not an operator mechanism for normal traffic management. Toggling it again heals
+the process; Raft then reconciles its term and log with the current leader.
+
 The real-process integration test starts all three members, elects a leader,
-checks follower redirects, commits a write, kills the leader with `SIGKILL`,
-elects a replacement, continues writing, restarts the old member from its
-original disk, verifies catch-up on every node, and proves an isolated leader
-cannot acknowledge a mutation.
+checks follower redirects, commits writes, and verifies a restarted follower can
+rejoin after a large bounded-batch catch-up. It then keeps the old leader's
+client port live while partitioning only peer traffic, elects a replacement,
+commits a new value, and proves stale GETs cannot return data. The test also
+checks pending-read admission remains bounded after client timeout, heals the
+partition, and inspects the former leader's durable log for the new value.

@@ -138,6 +138,11 @@ void PersistedRaftNode::propose(std::vector<std::byte> command) {
   impl_->drive(impl_->node.propose(std::move(command)));
 }
 
+void PersistedRaftNode::read_barrier() {
+  impl_->ensure_healthy();
+  impl_->drive(impl_->node.read_barrier());
+}
+
 RaftSnapshot PersistedRaftNode::snapshot() const {
   return impl_->node.snapshot();
 }

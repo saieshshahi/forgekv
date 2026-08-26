@@ -285,12 +285,13 @@ class PeerTransport final {
   }
 
   bool send(raft::SendMessage message) {
-    if (!is_request_message(message.message)) {
+    if (!is_request_message(message.message) ||
+        !enabled_.load(std::memory_order_acquire)) {
       return false;
     }
     {
       const std::lock_guard lock(mutex_);
-      if (stopping_) {
+      if (stopping_ || !enabled_.load(std::memory_order_relaxed)) {
         return false;
       }
       const auto bytes = peer_work_bytes(message);
@@ -317,6 +318,20 @@ class PeerTransport final {
     }
     condition_.notify_one();
     return true;
+  }
+
+  void set_enabled(const bool enabled) {
+    enabled_.store(enabled, std::memory_order_release);
+    if (!enabled) {
+      const std::lock_guard lock(mutex_);
+      queue_.clear();
+      queued_bytes_ = 0;
+    }
+    condition_.notify_all();
+  }
+
+  [[nodiscard]] bool enabled() const noexcept {
+    return enabled_.load(std::memory_order_acquire);
   }
 
   void stop() {
@@ -358,7 +373,7 @@ class PeerTransport final {
         queue_.pop_front();
       }
       const auto peer = peers_.find(work.to);
-      if (peer == peers_.end()) {
+      if (peer == peers_.end() || !enabled()) {
         continue;
       }
       try {
@@ -392,7 +407,9 @@ class PeerTransport final {
             !matches_peer_request(work.message, response.value->message)) {
           continue;
         }
-        response_sink_(work.to, std::move(response.value->message));
+        if (enabled()) {
+          response_sink_(work.to, std::move(response.value->message));
+        }
       } catch (const std::exception&) {
         // A transport/encoding failure is a dropped Raft message. The Raft
         // timer and later heartbeats drive retry without blocking its owner.
@@ -409,6 +426,7 @@ class PeerTransport final {
   ResponseSink response_sink_;
   std::unordered_map<raft::NodeId, PeerAddress> peers_;
   std::atomic<std::uint64_t> next_request_id_{1};
+  std::atomic<bool> enabled_{true};
   std::mutex mutex_;
   std::condition_variable condition_;
   std::deque<QueuedPeerWork> queue_;
@@ -586,6 +604,10 @@ class ClusterNode::Impl final {
     return failed_.load(std::memory_order_acquire);
   }
 
+  void set_peer_traffic_enabled(const bool enabled) {
+    transport_.set_enabled(enabled);
+  }
+
  private:
   struct Proposal final {
     ReplicatedCommand command;
@@ -594,6 +616,8 @@ class ClusterNode::Impl final {
   struct Read final {
     std::string key;
     std::shared_ptr<std::promise<ClientResult>> completion;
+    std::shared_ptr<std::atomic<bool>> canceled;
+    std::chrono::steady_clock::time_point deadline;
   };
   struct PeerRequest final {
     PeerEnvelope envelope;
@@ -609,6 +633,12 @@ class ClusterNode::Impl final {
     KvOperation operation{KvOperation::put};
     std::vector<std::byte> command;
     std::shared_ptr<std::promise<ClientResult>> completion;
+  };
+  struct PendingRead final {
+    std::string key;
+    std::shared_ptr<std::promise<ClientResult>> completion;
+    std::shared_ptr<std::atomic<bool>> canceled;
+    std::chrono::steady_clock::time_point deadline;
   };
 
   static void cancel(Work& work) {
@@ -636,6 +666,7 @@ class ClusterNode::Impl final {
         config_.peer_queue_capacity == 0 ||
         config_.peer_queue_byte_capacity == 0 ||
         config_.peer_worker_threads == 0 ||
+        config_.max_pending_reads == 0 ||
         config_.rpc_timeout_ms == 0 || config_.client_timeout_ms == 0) {
       return "invalid zero/empty cluster configuration";
     }
@@ -720,6 +751,7 @@ class ClusterNode::Impl final {
 
     auto completion = std::make_shared<std::promise<ClientResult>>();
     auto future = completion->get_future();
+    std::shared_ptr<std::atomic<bool>> cancellation;
     if (request.message_type == protocol::MessageType::put ||
         request.message_type == protocol::MessageType::delete_key) {
       auto decoded = decode_client_mutation(request);
@@ -735,8 +767,14 @@ class ClusterNode::Impl final {
       if (!decoded.ok()) {
         return error_response(request, 1, decoded.error);
       }
+      cancellation = std::make_shared<std::atomic<bool>>(false);
+      const auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(
+                                config_.client_timeout_ms);
       if (!post(Read{.key = std::move(*decoded.value),
-                     .completion = completion})) {
+                     .completion = completion,
+                     .canceled = cancellation,
+                     .deadline = deadline})) {
         return busy_response(request);
       }
     } else {
@@ -745,12 +783,18 @@ class ClusterNode::Impl final {
 
     if (future.wait_for(std::chrono::milliseconds(config_.client_timeout_ms)) !=
         std::future_status::ready) {
+      if (cancellation) {
+        cancellation->store(true, std::memory_order_release);
+      }
       return busy_response(request);
     }
     return result_frame(request, future.get());
   }
 
   protocol::Frame handle_peer(const protocol::Frame& request) {
+    if (!transport_.enabled()) {
+      throw std::runtime_error("peer traffic is administratively disabled");
+    }
     auto decoded = decode_peer_frame(request);
     const auto known_source =
         decoded.ok() && decoded.value->from != config_.node_id &&
@@ -845,6 +889,7 @@ class ClusterNode::Impl final {
           node_->advance_time(static_cast<raft::LogicalTime>(elapsed));
           next_tick = now + 10ms;
         }
+        expire_pending_reads(now);
         if (work.has_value()) {
           std::visit([this](auto& typed) { process(typed); }, *work);
         }
@@ -880,17 +925,41 @@ class ClusterNode::Impl final {
   }
 
   void process(Read& read) {
-    const auto value = state_machine_.find(read.key);
-    if (value == state_machine_.end()) {
-      read.completion->set_value(ClientResult{.status = ClientStatus::not_found,
-                                               .value = {},
-                                               .leader_endpoint = {}});
-    } else {
-      read.completion->set_value(
-          ClientResult{.status = ClientStatus::ok,
-                       .value = value->second,
-                       .leader_endpoint = {}});
+    const auto now = std::chrono::steady_clock::now();
+    if (read.canceled->load(std::memory_order_acquire) ||
+        now >= read.deadline) {
+      read.completion->set_value(ClientResult{.status = ClientStatus::retry,
+                                              .value = {},
+                                              .leader_endpoint = {}});
+      return;
     }
+    const auto snapshot = node_->snapshot();
+    if (snapshot.role != raft::Role::leader) {
+      read.completion->set_value(ClientResult{
+          .status = snapshot.leader_id.has_value() ? ClientStatus::redirect
+                                                   : ClientStatus::retry,
+          .value = {},
+          .leader_endpoint = leader_endpoint(snapshot.leader_id),
+      });
+      return;
+    }
+
+    if (pending_reads_.size() >= config_.max_pending_reads) {
+      read.completion->set_value(ClientResult{.status = ClientStatus::retry,
+                                              .value = {},
+                                              .leader_endpoint = {}});
+      return;
+    }
+
+    PendingRead pending{.key = std::move(read.key),
+                        .completion = read.completion,
+                        .canceled = read.canceled,
+                        .deadline = read.deadline};
+    const auto index = static_cast<raft::LogIndex>(snapshot.log.size()) + 1U;
+    pending_reads_.emplace(index, std::vector<PendingRead>{std::move(pending)});
+    active_read_barrier_index_ = index;
+    node_->read_barrier();
+    active_read_barrier_index_.reset();
   }
 
   void process(PeerRequest& request) {
@@ -947,11 +1016,54 @@ class ClusterNode::Impl final {
         });
         pending_.erase(pending);
       }
+      return;
+    }
+    if (std::holds_alternative<raft::ProposalRejected>(action) &&
+        active_read_barrier_index_.has_value()) {
+      const auto pending = pending_reads_.find(*active_read_barrier_index_);
+      if (pending != pending_reads_.end()) {
+        for (auto& read : pending->second) {
+          read.completion->set_value(ClientResult{
+              .status = leader_id_.has_value() ? ClientStatus::redirect
+                                               : ClientStatus::retry,
+              .value = {},
+              .leader_endpoint = leader_endpoint(leader_id_),
+          });
+        }
+        pending_reads_.erase(pending);
+      }
     }
   }
 
   void apply_entry(const raft::LogEntry& entry) {
     if (entry.kind == raft::EntryKind::no_op) {
+      const auto pending = pending_reads_.find(entry.index);
+      if (pending != pending_reads_.end()) {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& read : pending->second) {
+          if (read.canceled->load(std::memory_order_acquire) ||
+              now >= read.deadline) {
+            read.completion->set_value(
+                ClientResult{.status = ClientStatus::retry,
+                             .value = {},
+                             .leader_endpoint = {}});
+            continue;
+          }
+          const auto value = state_machine_.find(read.key);
+          if (value == state_machine_.end()) {
+            read.completion->set_value(
+                ClientResult{.status = ClientStatus::not_found,
+                             .value = {},
+                             .leader_endpoint = {}});
+          } else {
+            read.completion->set_value(
+                ClientResult{.status = ClientStatus::ok,
+                             .value = value->second,
+                             .leader_endpoint = {}});
+          }
+        }
+        pending_reads_.erase(pending);
+      }
       return;
     }
     auto decoded = decode_replicated_command(entry.command);
@@ -996,6 +1108,35 @@ class ClusterNode::Impl final {
                                                  .leader_endpoint = {}});
     }
     pending_.clear();
+    for (auto& [index, reads] : pending_reads_) {
+      static_cast<void>(index);
+      for (auto& read : reads) {
+        read.completion->set_value(ClientResult{.status = status,
+                                                .value = {},
+                                                .leader_endpoint = {}});
+      }
+    }
+    pending_reads_.clear();
+  }
+
+  void expire_pending_reads(
+      const std::chrono::steady_clock::time_point now) {
+    for (auto& [index, reads] : pending_reads_) {
+      static_cast<void>(index);
+      std::erase_if(reads, [now](PendingRead& read) {
+        const bool expired =
+            read.canceled->load(std::memory_order_acquire) ||
+            now >= read.deadline;
+        if (expired) {
+          read.completion->set_value(ClientResult{
+              .status = ClientStatus::retry,
+              .value = {},
+              .leader_endpoint = {},
+          });
+        }
+        return expired;
+      });
+    }
   }
 
   ClusterNodeConfig config_;
@@ -1023,7 +1164,9 @@ class ClusterNode::Impl final {
   std::optional<raft::NodeId> active_peer_from_;
   std::optional<raft::Message> active_peer_response_;
   std::optional<raft::LogIndex> active_proposal_index_;
+  std::optional<raft::LogIndex> active_read_barrier_index_;
   std::unordered_map<raft::LogIndex, PendingMutation> pending_;
+  std::unordered_map<raft::LogIndex, std::vector<PendingRead>> pending_reads_;
   std::unordered_map<std::string, std::vector<std::byte>> state_machine_;
   std::atomic<bool> failed_{};
 };
@@ -1034,6 +1177,9 @@ ClusterNode::~ClusterNode() = default;
 
 std::optional<std::string> ClusterNode::start() { return impl_->start(); }
 void ClusterNode::stop() { impl_->stop(); }
+void ClusterNode::set_peer_traffic_enabled(const bool enabled) {
+  impl_->set_peer_traffic_enabled(enabled);
+}
 std::uint16_t ClusterNode::client_port() const noexcept {
   return impl_->client_port();
 }

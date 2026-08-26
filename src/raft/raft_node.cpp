@@ -673,6 +673,18 @@ Actions RaftNode::propose(std::vector<std::byte> command) {
   return std::move(impl_->actions);
 }
 
+Actions RaftNode::read_barrier() {
+  impl_->actions.clear();
+  if (impl_->role != Role::leader) {
+    impl_->actions.push_back(ProposalRejected{.leader_id = impl_->leader_id});
+  } else {
+    impl_->append_local_entry(EntryKind::no_op, {});
+    impl_->broadcast_append_entries();
+  }
+  impl_->verify_invariants();
+  return std::move(impl_->actions);
+}
+
 RaftSnapshot RaftNode::snapshot() const {
   return RaftSnapshot{
       .self_id = impl_->config.self_id,

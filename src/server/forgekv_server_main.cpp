@@ -16,8 +16,10 @@
 namespace {
 
 volatile std::sig_atomic_t stop_requested = 0;
+volatile std::sig_atomic_t peer_toggle_requested = 0;
 
 void request_stop(const int) { stop_requested = 1; }
+void request_peer_toggle(const int) { peer_toggle_requested = 1; }
 
 std::uint64_t parse_u64(const std::string& text, const char* field) {
   std::size_t consumed = 0;
@@ -50,7 +52,8 @@ void usage() {
          "--client-port PORT --peer-port PORT "
          "--peer ID=HOST:PEER_PORT:CLIENT_PORT [--peer ...] "
          "(bracket IPv6 hosts) "
-         "[--bind ADDRESS] [--client-timeout-ms MILLISECONDS]\n";
+         "[--bind ADDRESS] [--client-timeout-ms MILLISECONDS] "
+         "[--max-pending-reads COUNT]\n";
 }
 
 }  // namespace
@@ -81,6 +84,8 @@ int main(const int argc, char** argv) {
         config.bind_address = value;
       } else if (argument == "--client-timeout-ms") {
         config.client_timeout_ms = parse_u32(value, "client timeout");
+      } else if (argument == "--max-pending-reads") {
+        config.max_pending_reads = parse_u32(value, "maximum pending reads");
       } else {
         usage();
         return 2;
@@ -94,9 +99,16 @@ int main(const int argc, char** argv) {
     }
     std::signal(SIGINT, request_stop);
     std::signal(SIGTERM, request_stop);
+    std::signal(SIGUSR1, request_peer_toggle);
     std::cout << "READY client_port=" << node.client_port()
               << " peer_port=" << node.peer_port() << std::endl;
+    bool peer_traffic_enabled = true;
     while (stop_requested == 0 && !node.failed()) {
+      if (peer_toggle_requested != 0) {
+        peer_toggle_requested = 0;
+        peer_traffic_enabled = !peer_traffic_enabled;
+        node.set_peer_traffic_enabled(peer_traffic_enabled);
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     const bool failed = node.failed();

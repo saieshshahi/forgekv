@@ -46,6 +46,7 @@ class PersistedRaftNode final {
   void advance_time(LogicalTime now);
   void step(NodeId from, const Message& message);
   void propose(std::vector<std::byte> command);
+  void read_barrier();
 
   [[nodiscard]] RaftSnapshot snapshot() const;
   [[nodiscard]] RaftPersistentState durable_state() const;

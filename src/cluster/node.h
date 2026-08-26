@@ -41,6 +41,7 @@ struct ClusterNodeConfig final {
   std::size_t peer_queue_capacity{4096};
   std::size_t peer_queue_byte_capacity{16U * 1024U * 1024U};
   std::size_t peer_worker_threads{2};
+  std::size_t max_pending_reads{64};
   std::uint32_t rpc_timeout_ms{500};
   std::uint32_t client_timeout_ms{10'000};
 };
@@ -55,6 +56,7 @@ class ClusterNode final {
 
   [[nodiscard]] std::optional<std::string> start();
   void stop();
+  void set_peer_traffic_enabled(bool enabled);
 
   [[nodiscard]] std::uint16_t client_port() const noexcept;
   [[nodiscard]] std::uint16_t peer_port() const noexcept;

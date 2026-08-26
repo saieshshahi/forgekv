@@ -881,6 +881,74 @@ TEST(RaftProposal, FollowerRejectsWithKnownLeaderHint) {
   EXPECT_TRUE(follower.snapshot().log.empty());
 }
 
+TEST(RaftReadBarrier, FollowerRejectsWithKnownLeaderHint) {
+  RaftNode follower(config());
+  static_cast<void>(
+      follower.step(2, append(1, 2, 0, 0, {}, 0, 1)));
+
+  const auto actions = follower.read_barrier();
+  ASSERT_EQ(actions_of<ProposalRejected>(actions).size(), 1U);
+  EXPECT_EQ(actions_of<ProposalRejected>(actions)[0].leader_id, 2U);
+  EXPECT_TRUE(follower.snapshot().log.empty());
+}
+
+TEST(RaftReadBarrier, PersistsCurrentTermNoOpAndRequiresMajorityToApply) {
+  RaftNode leader(config());
+  static_cast<void>(elect(leader));
+
+  const auto barrier = leader.read_barrier();
+  const auto persisted = actions_of<PersistLog>(barrier);
+  ASSERT_EQ(persisted.size(), 1U);
+  ASSERT_EQ(persisted[0].entries.size(), 1U);
+  EXPECT_EQ(persisted[0].entries[0].index, 2U);
+  EXPECT_EQ(persisted[0].entries[0].term, 1U);
+  EXPECT_EQ(persisted[0].entries[0].kind, EntryKind::no_op);
+  EXPECT_TRUE(persisted[0].entries[0].command.empty());
+  EXPECT_TRUE(actions_of<ApplyEntry>(barrier).empty());
+
+  const auto sends = actions_of<SendMessage>(barrier);
+  const auto peer_two = std::ranges::find_if(
+      sends, [](const SendMessage& send) { return send.to == 2U; });
+  ASSERT_NE(peer_two, sends.end());
+  const auto& append_request = std::get<AppendEntries>(peer_two->message);
+  const auto committed = leader.step(
+      2, AppendEntriesResponse{.term = 1,
+                               .success = true,
+                               .match_index = 2,
+                               .reject_hint = 0,
+                               .rpc_id = append_request.rpc_id});
+  const auto applied = actions_of<ApplyEntry>(committed);
+  ASSERT_EQ(applied.size(), 2U);
+  EXPECT_EQ(applied.back().entry, persisted[0].entries[0]);
+  EXPECT_EQ(leader.snapshot().commit_index, 2U);
+  EXPECT_EQ(leader.snapshot().last_applied, 2U);
+}
+
+TEST(RaftReadBarrier, HigherTermLeadershipLossRejectsDelayedBarrierAck) {
+  RaftNode leader(config());
+  static_cast<void>(elect(leader));
+  const auto barrier = leader.read_barrier();
+  const auto sends = actions_of<SendMessage>(barrier);
+  const auto peer_two = std::ranges::find_if(
+      sends, [](const SendMessage& send) { return send.to == 2U; });
+  ASSERT_NE(peer_two, sends.end());
+  const auto request = std::get<AppendEntries>(peer_two->message);
+
+  static_cast<void>(leader.step(3, RequestVote{.term = 2,
+                                               .candidate_id = 3,
+                                               .last_log_index = 2,
+                                               .last_log_term = 1}));
+  EXPECT_EQ(leader.snapshot().role, Role::follower);
+  const auto delayed = leader.step(
+      2, AppendEntriesResponse{.term = 1,
+                               .success = true,
+                               .match_index = 2,
+                               .reject_hint = 0,
+                               .rpc_id = request.rpc_id});
+  EXPECT_TRUE(actions_of<ApplyEntry>(delayed).empty());
+  EXPECT_EQ(leader.snapshot().commit_index, 0U);
+}
+
 TEST(RaftMessages, UnknownPeerCannotChangeStateOrReceiveResponse) {
   RaftNode node(config());
   const auto before = node.snapshot();

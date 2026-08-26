@@ -83,6 +83,15 @@ All ForgeKV targets compile with:
 -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 ```
 
+## Correctness notes
+
+- [`docs/cluster.md`](docs/cluster.md) describes the real multi-process Raft
+  runtime and fixed-membership transport contract.
+- [`docs/linearizable-reads.md`](docs/linearizable-reads.md) documents why GETs
+  use a replicated barrier and compares the future ReadIndex and lease options.
+- [`docs/raft-persistence.md`](docs/raft-persistence.md) defines the durable
+  identity, hard-state, and log formats.
+
 ## Logging
 
 `common/logging.h` provides severity levels from `trace` through `critical`, a

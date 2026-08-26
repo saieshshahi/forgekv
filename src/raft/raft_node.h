@@ -25,6 +25,7 @@ class RaftNode final {
   Actions advance_time(LogicalTime now);
   Actions step(NodeId from, const Message& message);
   Actions propose(std::vector<std::byte> command);
+  Actions read_barrier();
 
   [[nodiscard]] RaftSnapshot snapshot() const;
   [[nodiscard]] std::optional<PeerProgress> progress(NodeId peer) const;

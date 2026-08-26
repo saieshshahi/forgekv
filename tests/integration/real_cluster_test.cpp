@@ -2,6 +2,8 @@
 #include "protocol/parser.h"
 #include "protocol/serializer.h"
 #include "protocol/wire.h"
+#include "raft/persisted_raft_node.h"
+#include "raft/raft_storage.h"
 
 #include <gtest/gtest.h>
 
@@ -21,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <set>
@@ -118,6 +121,13 @@ class ServerProcess final {
     if (pid_ > 0) {
       static_cast<void>(::kill(pid_, SIGKILL));
       wait();
+    }
+  }
+
+  void toggle_peer_partition() {
+    if (pid_ > 0) {
+      static_cast<void>(::kill(pid_, SIGUSR1));
+      std::this_thread::sleep_for(250ms);
     }
   }
 
@@ -339,6 +349,57 @@ std::optional<std::string> wait_for_redirect(
   return std::nullopt;
 }
 
+std::optional<std::string> wait_for_get_redirect(
+    const std::uint16_t port, const std::string& expected,
+    std::uint64_t& request_id) {
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (std::chrono::steady_clock::now() < deadline) {
+    const auto response = request(port, get(++request_id, "alpha"));
+    if (response.has_value() &&
+        response->message_type == protocol::MessageType::redirect &&
+        response->payload.size() >= 2U) {
+      const auto encoded_size =
+          (std::to_integer<std::uint16_t>(response->payload[0]) << 8U) |
+          std::to_integer<std::uint16_t>(response->payload[1]);
+      const auto size = static_cast<std::size_t>(encoded_size);
+      if (response->payload.size() == 2U + size) {
+        const std::string endpoint(
+            reinterpret_cast<const char*>(response->payload.data() + 2U),
+            size);
+        if (endpoint == expected) {
+          return endpoint;
+        }
+      }
+    }
+    std::this_thread::sleep_for(20ms);
+  }
+  return std::nullopt;
+}
+
+bool durable_has_put(const std::filesystem::path& directory,
+                     const raft::NodeId node_id, const std::string& key,
+                     const std::string& value) {
+  auto storage = raft::RaftStorage::open(
+      directory, 4242, node_id, {},
+      raft::fixed_membership_fingerprint({1, 2, 3}));
+  for (const auto& entry : storage.state().log) {
+    if (entry.kind != raft::EntryKind::command) {
+      continue;
+    }
+    const auto command = decode_replicated_command(entry.command);
+    if (command.ok() && command.value->operation == KvOperation::put &&
+        command.value->key == key) {
+      const std::string stored(
+          reinterpret_cast<const char*>(command.value->value.data()),
+          command.value->value.size());
+      if (stored == value) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
   ClusterDirectory directory;
   std::set<std::uint16_t> used_ports;
@@ -359,15 +420,18 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
                              std::to_string(client_ports[index]));
   }
   std::vector<std::unique_ptr<ServerProcess>> processes;
+  std::array<std::filesystem::path, 3> node_directories;
   for (std::size_t index = 0; index < 3U; ++index) {
     const auto node_directory = directory.path() /
                                 ("node-" + std::to_string(index + 1U));
+    node_directories[index] = node_directory;
     std::filesystem::create_directories(node_directory);
     std::vector<std::string> arguments{
         "--cluster-id", "4242", "--node-id", std::to_string(index + 1U),
         "--data-dir", node_directory.string(), "--client-port",
         std::to_string(client_ports[index]), "--peer-port",
         std::to_string(peer_ports[index]), "--client-timeout-ms", "3000",
+        "--max-pending-reads", "1",
     };
     for (const auto& peer : peer_arguments) {
       arguments.push_back("--peer");
@@ -396,6 +460,9 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
       "127.0.0.1:" + std::to_string(client_ports[*first_leader]);
   EXPECT_EQ(wait_for_redirect(client_ports[follower], leader_endpoint,
                               request_id),
+            leader_endpoint);
+  EXPECT_EQ(wait_for_get_redirect(client_ports[follower], leader_endpoint,
+                                  request_id),
             leader_endpoint);
 
   const auto leader_node_id = static_cast<raft::NodeId>(*first_leader + 1U);
@@ -456,10 +523,10 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
     ASSERT_EQ(response->message_type, protocol::MessageType::ok);
   }
   ASSERT_TRUE(processes[follower]->start());
-  ASSERT_TRUE(wait_for_value(client_ports[follower], "large-two", large_value,
-                             request_id));
+  ASSERT_TRUE(wait_for_value(client_ports[*first_leader], "large-two",
+                             large_value, request_id));
 
-  processes[*first_leader]->kill9();
+  processes[*first_leader]->toggle_peer_partition();
   auto survivors = all_nodes;
   survivors.erase(*first_leader);
   const auto second_leader = find_leader(client_ports, survivors, request_id);
@@ -472,26 +539,42 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
   ASSERT_TRUE(wait_for_value(client_ports[*second_leader], "beta", "two",
                              request_id));
 
-  ASSERT_TRUE(processes[*first_leader]->start());
-  ASSERT_TRUE(wait_for_value(client_ports[*first_leader], "beta", "two",
-                             request_id));
-  for (const auto index : all_nodes) {
-    EXPECT_TRUE(wait_for_value(client_ports[index], "alpha", "one", request_id))
-        << "node " << index + 1U;
-    EXPECT_TRUE(wait_for_value(client_ports[index], "beta", "two", request_id))
-        << "node " << index + 1U;
-  }
-
-
-  for (const auto index : all_nodes) {
-    if (index != *second_leader) {
-      processes[index]->kill9();
-    }
-  }
-  response = request(client_ports[*second_leader],
-                     put(++request_id, "minority", "must-not-commit"));
+  const auto first_stale_id = ++request_id;
+  auto first_stale_read = std::async(std::launch::async, [&] {
+    return request(client_ports[*first_leader], get(first_stale_id, "beta"));
+  });
+  std::this_thread::sleep_for(250ms);
+  const auto rejected_at = std::chrono::steady_clock::now();
+  response = request(client_ports[*first_leader], get(++request_id, "alpha"));
+  const auto rejection_latency =
+      std::chrono::steady_clock::now() - rejected_at;
   ASSERT_TRUE(response.has_value());
   EXPECT_NE(response->message_type, protocol::MessageType::ok);
+  EXPECT_LT(rejection_latency, 2s);
+  response = first_stale_read.get();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_NE(response->message_type, protocol::MessageType::ok);
+  const auto post_timeout_at = std::chrono::steady_clock::now();
+  response = request(client_ports[*first_leader], get(++request_id, "beta"));
+  const auto post_timeout_latency =
+      std::chrono::steady_clock::now() - post_timeout_at;
+  ASSERT_TRUE(response.has_value());
+  EXPECT_NE(response->message_type, protocol::MessageType::ok);
+  EXPECT_LT(post_timeout_latency, 2s);
+
+  processes[*first_leader]->toggle_peer_partition();
+  bool caught_up = false;
+  for (int attempt = 0; attempt < 20 && !caught_up; ++attempt) {
+    std::this_thread::sleep_for(200ms);
+    processes[*first_leader]->kill9();
+    caught_up = durable_has_put(node_directories[*first_leader],
+                                static_cast<raft::NodeId>(*first_leader + 1U),
+                                "beta", "two");
+    if (!caught_up) {
+      ASSERT_TRUE(processes[*first_leader]->start());
+    }
+  }
+  EXPECT_TRUE(caught_up);
 }
 
 }  // namespace

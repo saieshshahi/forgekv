@@ -156,6 +156,41 @@ TEST(PersistedRaftNodeTest, InvalidConfigCannotInitializeStorage) {
   EXPECT_FALSE(node.failed());
 }
 
+TEST(PersistedRaftNodeTest, ReadBarrierIsDurableBeforeReplicationOutput) {
+  DriverDirectory directory;
+  std::vector<std::string> events;
+  auto node = PersistedRaftNode::open(PersistedRaftOptions{
+      .config = driver_config(),
+      .data_directory = directory.path(),
+      .initial_time = 0,
+      .output = [&events](const Action& action) {
+        if (std::holds_alternative<SendMessage>(action)) {
+          events.push_back("output");
+        }
+      },
+      .crash_hook = [&events](const RaftCrashPoint point) {
+        events.push_back(point_name(point));
+      },
+  });
+  node.advance_time(node.snapshot().election_deadline);
+  node.step(2, RequestVoteResponse{.term = 1, .vote_granted = true});
+  events.clear();
+
+  node.read_barrier();
+
+  ASSERT_GE(events.size(), 6U);
+  EXPECT_EQ(events[0], "before_persist");
+  EXPECT_EQ(events[1], "after_write");
+  EXPECT_EQ(events[2], "after_file_sync");
+  EXPECT_EQ(events[3], "after_sync");
+  EXPECT_EQ(events[4], "before_response");
+  EXPECT_EQ(events[5], "output");
+  const auto durable = node.durable_state();
+  ASSERT_EQ(durable.log.size(), 2U);
+  EXPECT_EQ(durable.log.back().kind, EntryKind::no_op);
+  EXPECT_EQ(durable.log.back().term, 1U);
+}
+
 TEST(PersistedRaftNodeTest, StorageAndDriverShareOneStatefulCrashHook) {
   DriverDirectory directory;
   std::vector<std::size_t> observations;
