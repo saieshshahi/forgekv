@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <stdexcept>
 #include <variant>
 #include <vector>
@@ -91,6 +93,18 @@ TEST(RaftNodeConfig, RejectsInvalidMembershipAndTiming) {
   heartbeat_too_slow.heartbeat_interval =
       heartbeat_too_slow.election_timeout_min;
   EXPECT_THROW(RaftNode node(heartbeat_too_slow), std::invalid_argument);
+}
+
+TEST(RaftElection, TerminalTermCannotWrapOnElection) {
+  RaftNode node(config(),
+                RaftPersistentState{
+                    .current_term = std::numeric_limits<Term>::max(),
+                    .voted_for = std::nullopt,
+                    .log = {},
+                },
+                0);
+  EXPECT_THROW(static_cast<void>(trigger_election(node)), std::overflow_error);
+  EXPECT_EQ(node.snapshot().current_term, std::numeric_limits<Term>::max());
 }
 
 TEST(RaftNodeRecovery, RestoresPersistentStateAtRestartLogicalTime) {
@@ -571,8 +585,8 @@ TEST(RaftLeaderReplication, DelayedAndReorderedResponsesCannotRegressProgress) {
                                     }));
   progress = leader.progress(2);
   ASSERT_TRUE(progress.has_value());
-  EXPECT_EQ(progress->match_index, 0U);
-  EXPECT_EQ(progress->newest_rpc_id, newest_rpc);
+  EXPECT_EQ(progress->match_index, 1U);
+  EXPECT_GT(progress->newest_rpc_id, newest_rpc);
 
   static_cast<void>(leader.step(2, AppendEntriesResponse{
                                         .term = 1,
@@ -597,6 +611,74 @@ TEST(RaftLeaderReplication, DelayedAndReorderedResponsesCannotRegressProgress) {
   ASSERT_TRUE(progress.has_value());
   EXPECT_EQ(progress->match_index, 2U);
   EXPECT_EQ(progress->next_index, 3U);
+}
+
+TEST(RaftLeaderReplication, ResponseMustMatchPeerAndSentLogRange) {
+  RaftNode leader(config());
+  const auto elected = elect(leader);
+  const auto sends = actions_of<SendMessage>(elected);
+  const auto to_second = std::ranges::find_if(
+      sends, [](const SendMessage& send) { return send.to == 2; });
+  const auto to_third = std::ranges::find_if(
+      sends, [](const SendMessage& send) { return send.to == 3; });
+  ASSERT_NE(to_second, sends.end());
+  ASSERT_NE(to_third, sends.end());
+  const auto second_rpc =
+      std::get<AppendEntries>(to_second->message).rpc_id;
+  const auto third_rpc = std::get<AppendEntries>(to_third->message).rpc_id;
+
+  static_cast<void>(leader.step(2, AppendEntriesResponse{
+                                        .term = 1,
+                                        .success = true,
+                                        .match_index = 1,
+                                        .reject_hint = 0,
+                                        .rpc_id = third_rpc,
+                                    }));
+  auto progress = leader.progress(2);
+  ASSERT_TRUE(progress.has_value());
+  EXPECT_EQ(progress->match_index, 0U);
+
+  static_cast<void>(leader.propose({std::byte{0x71}}));
+  static_cast<void>(leader.step(2, AppendEntriesResponse{
+                                        .term = 1,
+                                        .success = true,
+                                        .match_index = 99,
+                                        .reject_hint = 0,
+                                        .rpc_id = second_rpc,
+                                    }));
+  progress = leader.progress(2);
+  ASSERT_TRUE(progress.has_value());
+  EXPECT_EQ(progress->match_index, 1U);
+  EXPECT_EQ(leader.snapshot().commit_index, 1U);
+}
+
+TEST(RaftLeaderReplication, MissingSuffixIsSentInBoundedBatches) {
+  auto bounded = config();
+  bounded.max_append_entries = 2;
+  bounded.max_append_bytes = 50;
+  RaftNode leader(bounded);
+  static_cast<void>(elect(leader));
+  static_cast<void>(leader.propose({std::byte{0x61}}));
+  static_cast<void>(leader.propose({std::byte{0x62}}));
+  static_cast<void>(leader.propose({std::byte{0x63}}));
+
+  auto progress = leader.progress(2);
+  ASSERT_TRUE(progress.has_value());
+  const auto actions = leader.step(2, AppendEntriesResponse{
+                                          .term = 1,
+                                          .success = true,
+                                          .match_index = 2,
+                                          .reject_hint = 0,
+                                          .rpc_id = progress->newest_rpc_id,
+                                      });
+  const auto sends = actions_of<SendMessage>(actions);
+  const auto next = std::ranges::find_if(
+      sends, [](const SendMessage& send) { return send.to == 2; });
+  ASSERT_NE(next, sends.end());
+  const auto& append = std::get<AppendEntries>(next->message);
+  ASSERT_EQ(append.entries.size(), 2U);
+  EXPECT_EQ(append.entries.front().index, 3U);
+  EXPECT_EQ(append.entries.back().index, 4U);
 }
 
 TEST(RaftLeaderReplication, RejectionBacktracksAndResendsTheMissingSuffix) {

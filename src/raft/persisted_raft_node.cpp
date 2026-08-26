@@ -1,10 +1,25 @@
 #include "raft/persisted_raft_node.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
 
 namespace forgekv::raft {
+
+std::uint64_t fixed_membership_fingerprint(std::vector<NodeId> voters) {
+  std::ranges::sort(voters);
+  std::uint64_t hash = 0xCBF29CE484222325ULL;
+  for (const auto voter : voters) {
+    for (unsigned int shift = 0; shift < 64U; shift += 8U) {
+      hash ^= (voter >> shift) & 0xFFU;
+      hash *= 0x100000001B3ULL;
+    }
+  }
+  hash ^= voters.size();
+  hash *= 0x100000001B3ULL;
+  return hash == 0 ? 1 : hash;
+}
 
 struct PersistedRaftNode::Impl final {
   Impl(RaftConfig config, RaftStorage durable_storage,
@@ -78,8 +93,11 @@ PersistedRaftNode PersistedRaftNode::open(PersistedRaftOptions options) {
   if (!options.output) {
     throw std::invalid_argument("persisted Raft driver requires an output sink");
   }
+  validate_raft_config(options.config);
   auto shared_crash_hook =
       std::make_shared<RaftCrashHook>(std::move(options.crash_hook));
+  const auto voter_fingerprint =
+      fixed_membership_fingerprint(options.config.voters);
   auto storage =
       RaftStorage::open(options.data_directory, options.config.cluster_id,
                         options.config.self_id,
@@ -91,7 +109,8 @@ PersistedRaftNode PersistedRaftNode::open(PersistedRaftOptions options) {
                           (*hook)(point == RaftStorageSyncPoint::after_file_sync
                                       ? RaftCrashPoint::after_file_sync
                                       : RaftCrashPoint::after_rename);
-                        });
+                        },
+                        voter_fingerprint);
   return PersistedRaftNode(std::make_unique<Impl>(
       std::move(options.config), std::move(storage), options.initial_time,
       std::move(options.output), std::move(shared_crash_hook)));

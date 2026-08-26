@@ -30,19 +30,37 @@ artifact may be silently recreated. Strictly recognized unpublished temporary
 files are removed only after authoritative recovery. Every durable file binds
 both cluster and node ID.
 
-`IDENTITY` is a 32-byte checksummed record containing magic `FRID`, format and
-record size, cluster ID, node ID, reserved bytes, and CRC32. It is published
-last using temporary-file, file-sync, rename, and directory-sync ordering. A
-missing marker is resumable only while every recovered structure is pristine.
+`IDENTITY` is a 40-byte checksummed record containing magic `FRID`, format and
+record size, cluster ID, node ID, a canonical fixed-voter fingerprint, reserved
+bytes, and CRC32. It is published last using temporary-file, file-sync, rename,
+and directory-sync ordering. A missing marker is resumable only while every
+recovered structure is pristine. The same voter fingerprint appears in the log
+header, so changing voting IDs on restart fails closed.
+The fingerprint sorts voter IDs numerically, feeds each ID least-significant
+byte first into 64-bit FNV-1a, then feeds the voter count; an all-zero result is
+encoded as one. It binds voting identity, not mutable network endpoints.
 
-## Hard-state format, version 1
+Identity format version 2 is:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | magic `FRID` |
+| 4 | 2 | format version (`2`) |
+| 6 | 2 | record size (`40`) |
+| 8 | 8 | cluster ID |
+| 16 | 8 | node ID |
+| 24 | 8 | canonical fixed-voter fingerprint |
+| 32 | 4 | reserved zero |
+| 36 | 4 | CRC32 over bytes 0–35 |
+
+## Hard-state format, version 2
 
 All integers are unsigned big-endian. The record is exactly 60 bytes.
 
 | Offset | Size | Field |
 |---:|---:|---|
 | 0 | 4 | magic `FRHS` |
-| 4 | 2 | format version (`1`) |
+| 4 | 2 | format version (`2`) |
 | 6 | 2 | flags: bit 0 means vote present |
 | 8 | 4 | record size (`60`) |
 | 12 | 4 | reserved zero |
@@ -61,18 +79,18 @@ renames it over the inactive slot, and calls `fsync` on the directory. Only then
 does that generation become the driver's durable state. A crash before rename
 leaves the previous named generations intact. Generation overflow fails closed.
 
-## Log journal format, version 1
+## Log journal format, version 2
 
 The 36-byte journal header is:
 
 | Offset | Size | Field |
 |---:|---:|---|
 | 0 | 4 | magic `FRLG` |
-| 4 | 2 | format version (`1`) |
+| 4 | 2 | format version (`2`) |
 | 6 | 2 | header size (`36`) |
 | 8 | 8 | cluster ID |
 | 16 | 8 | node ID |
-| 24 | 8 | reserved zero |
+| 24 | 8 | canonical fixed-voter fingerprint |
 | 32 | 4 | CRC32 over bytes 0–31 |
 
 Each following transaction describes one suffix replacement.
@@ -80,7 +98,7 @@ Each following transaction describes one suffix replacement.
 | Offset | Size | Field |
 |---:|---:|---|
 | 0 | 4 | magic `FRLR` |
-| 4 | 2 | format version (`1`) |
+| 4 | 2 | format version (`2`) |
 | 6 | 2 | transaction header size (`32`) |
 | 8 | 4 | total transaction size |
 | 12 | 4 | entry count |
@@ -99,7 +117,7 @@ Every entry then contains:
 | 20 | 4 | payload length |
 | 24 | variable | command bytes |
 
-Transactions are capped at 64 MiB, 4,096 entries, and 1 MiB per command.
+Transactions are capped at 64 MiB, 4,096 entries, and 1,049,664 bytes per command.
 Indexes must be gap-free, terms nonzero and nondecreasing, and entry terms may
 not exceed durable current term.
 
@@ -114,6 +132,15 @@ temporary-file, flush, rename, and directory-flush sequence as hard state.
 Before recovery returns, it synchronizes the accepted journal and directory.
 This completes durability if a prior process died after a complete append or
 rename became visible but before its final sync.
+
+Phase 9 increments the complete Raft storage format from version 1 to version 2
+because the fixed-voter fingerprint changes the identity and journal headers.
+There is no automatic in-place migration: a version 1 store fails with an
+explicit offline-migration/data-wipe diagnostic. In this pre-release staged
+project, an operator may archive and wipe a version 1 node directory and let
+that node rejoin from a surviving quorum. A production upgrade tool must
+preserve the old bytes, atomically publish every version 2 artifact, and be
+separately crash-tested before in-place upgrades are supported.
 
 The single journal is the Phase 8 correctness baseline. Phase 11 snapshots and
 compaction will bound it and introduce segment/manifest publication as described

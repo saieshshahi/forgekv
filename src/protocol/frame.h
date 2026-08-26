@@ -12,7 +12,10 @@ inline constexpr std::uint8_t kVersion = 1U;
 inline constexpr std::size_t kHeaderSize = 24U;
 inline constexpr std::size_t kMaxKeySize = 1U << 10U;
 inline constexpr std::size_t kMaxValueSize = 1U << 20U;
-inline constexpr std::size_t kMaxPayloadSize = kMaxKeySize + kMaxValueSize + 64U;
+inline constexpr std::size_t kMaxClientCommandSize =
+    kMaxKeySize + kMaxValueSize + 64U;
+inline constexpr std::size_t kMaxPayloadSize =
+    kMaxKeySize + kMaxValueSize + 256U;
 inline constexpr std::size_t kMaxFrameSize = kHeaderSize + kMaxPayloadSize;
 
 static_assert(kHeaderSize == 24U);

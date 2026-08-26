@@ -43,6 +43,11 @@ RaftConfig config() {
   };
 }
 
+RaftStorage open_storage(const std::filesystem::path& directory) {
+  return RaftStorage::open(directory, 1, 1, {},
+                           fixed_membership_fingerprint(config().voters));
+}
+
 void run_helper(const std::filesystem::path& directory, const char* mode,
                 const char* point, const char* occurrence = "1") {
   const auto child = ::fork();
@@ -88,7 +93,7 @@ TEST(RaftPersistenceCrashTest, VoteTransitionIsSafeAtEveryBoundary) {
         std::filesystem::exists(directory.path() / "response.marker");
     EXPECT_EQ(marker, test_case.response_visible) << test_case.point;
 
-    auto storage = RaftStorage::open(directory.path(), 1, 1);
+    auto storage = open_storage(directory.path());
     if (test_case.must_have_term) {
       EXPECT_EQ(storage.state().current_term, 1U) << test_case.point;
     }
@@ -121,7 +126,7 @@ TEST(RaftPersistenceCrashTest, AppendTransitionIsSafeAtEveryBoundary) {
         std::filesystem::exists(directory.path() / "response.marker");
     EXPECT_EQ(marker, test_case.response_visible) << test_case.point;
 
-    auto storage = RaftStorage::open(directory.path(), 1, 1);
+    auto storage = open_storage(directory.path());
     if (test_case.must_have_entry || marker) {
       ASSERT_EQ(storage.state().log.size(), 1U) << test_case.point;
       EXPECT_EQ(storage.state().log.front().term, 2U);
@@ -161,7 +166,7 @@ TEST(RaftPersistenceCrashTest,
         std::filesystem::exists(directory.path() / "response.marker");
     EXPECT_EQ(marker, test_case.response_visible) << test_case.point;
 
-    auto storage = RaftStorage::open(directory.path(), 1, 1);
+    auto storage = open_storage(directory.path());
     EXPECT_EQ(storage.state().current_term, test_case.expected_term)
         << test_case.point << " occurrence " << test_case.occurrence;
     if (test_case.entry == EntryExpectation::absent) {
@@ -181,7 +186,7 @@ TEST(RaftPersistenceCrashTest,
   // This restart accepts the complete renamed generation, syncs the journal
   // and directory, then is killed immediately. A second restart must retain it.
   run_helper(directory.path(), "recover", "before_persist");
-  auto recovered = RaftStorage::open(directory.path(), 1, 1);
+  auto recovered = open_storage(directory.path());
   EXPECT_EQ(recovered.state().current_term, 1U);
   EXPECT_EQ(recovered.state().voted_for, 2U);
 }

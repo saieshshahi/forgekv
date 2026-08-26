@@ -1,6 +1,6 @@
 # ForgeKV Wire Protocol Version 1
 
-Status: Phase 2 implemented format
+Status: Phase 9 implemented format
 
 ## 1. Framing
 
@@ -26,10 +26,12 @@ The CRC-32 uses reflected polynomial `0xEDB88320`, initial state
 `0xFFFFFFFF`, and final XOR `0xFFFFFFFF`. It covers header bytes 0–19 followed
 by the payload; the checksum field itself is excluded.
 
-The maximum payload is 1,049,664 bytes: a 1 MiB value, 1 KiB key, and 64 bytes
-of bounded command metadata. The maximum complete frame is 1,049,688 bytes.
-Implementations validate length and enum fields before allocating payload
-storage.
+The maximum client command is 1,049,664 bytes: a 1 MiB value, 1 KiB key, and
+64 bytes of bounded command metadata. The shared frame parser permits a
+1,049,856-byte payload and 1,049,880-byte complete frame so the peer namespace
+can wrap one maximum client command with bounded Raft metadata. Client semantic
+codecs still enforce the smaller operation-specific limits. Implementations
+validate length and enum fields before allocating payload storage.
 
 ## 2. Message namespaces and types
 
@@ -47,9 +49,12 @@ Client namespace (`01`):
 | `83` | REDIRECT | response |
 | `84` | BUSY | response |
 
-Raft namespace (`02`) reserves `40` AppendEntries, `41` RequestVote, and `42`
-InstallSnapshot. Phase 2 frames these values but does not implement Raft.
-Using a type in the wrong namespace is a protocol error.
+Raft namespace (`02`) uses `40` for AppendEntries and its response and `41` for
+RequestVote and its response. `42` is reserved for InstallSnapshot in Phase 11.
+The payload begins with a fixed peer envelope containing `cluster_id`, source
+node ID, destination node ID, and an explicit request/response discriminator,
+followed by the bounded message body. Using a type in the wrong namespace is a
+protocol error.
 
 ## 3. Client payloads
 

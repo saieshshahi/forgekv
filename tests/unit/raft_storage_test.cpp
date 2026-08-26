@@ -87,6 +87,21 @@ TEST(RaftStorageTest, RejectsConcurrentOwnershipOfOneNodeDirectory) {
       static_cast<void>(RaftStorage::open(directory.path(), 99, 7)));
 }
 
+TEST(RaftStorageTest, LegacyVersionOneIdentityRequiresExplicitMigration) {
+  TestDirectory directory;
+  {
+    auto storage = RaftStorage::open(directory.path(), 99, 7);
+    storage.close();
+  }
+  std::filesystem::resize_file(directory.path() / "IDENTITY", 32U);
+  try {
+    static_cast<void>(RaftStorage::open(directory.path(), 99, 7));
+    FAIL() << "legacy identity unexpectedly opened";
+  } catch (const RaftStorageError& error) {
+    EXPECT_NE(std::string(error.what()).find("version 1"), std::string::npos);
+  }
+}
+
 TEST(RaftStorageTest, HardStateAlternatesChecksummedGenerations) {
   TestDirectory directory;
   {

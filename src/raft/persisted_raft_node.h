@@ -30,6 +30,9 @@ struct PersistedRaftOptions final {
   RaftCrashHook crash_hook;
 };
 
+[[nodiscard]] std::uint64_t fixed_membership_fingerprint(
+    std::vector<NodeId> voters);
+
 class PersistedRaftNode final {
  public:
   [[nodiscard]] static PersistedRaftNode open(PersistedRaftOptions options);

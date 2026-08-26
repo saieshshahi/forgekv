@@ -30,9 +30,9 @@ constexpr std::uint32_t kHardMagic = 0x46524853U;
 constexpr std::uint32_t kIdentityMagic = 0x46524944U;
 constexpr std::uint32_t kLogMagic = 0x46524C47U;
 constexpr std::uint32_t kLogRecordMagic = 0x46524C52U;
-constexpr std::uint16_t kFormatVersion = 1U;
+constexpr std::uint16_t kFormatVersion = 2U;
 constexpr std::size_t kHardStateSize = 60U;
-constexpr std::size_t kIdentitySize = 32U;
+constexpr std::size_t kIdentitySize = 40U;
 constexpr std::size_t kLogHeaderSize = 36U;
 constexpr std::size_t kLogRecordHeaderSize = 32U;
 constexpr std::size_t kEntryHeaderSize = 24U;
@@ -243,8 +243,9 @@ std::vector<std::byte> encode_hard_state(const std::uint64_t cluster_id,
   return bytes;
 }
 
-std::vector<std::byte> encode_identity(const std::uint64_t cluster_id,
-                                       const NodeId node_id) {
+std::vector<std::byte> encode_identity(
+    const std::uint64_t cluster_id, const NodeId node_id,
+    const std::uint64_t membership_fingerprint) {
   std::vector<std::byte> bytes(kIdentitySize);
   wire::write_u32(std::span{bytes}.subspan(0, 4), kIdentityMagic);
   write_u16(std::span{bytes}.subspan(4, 2), kFormatVersion);
@@ -252,21 +253,24 @@ std::vector<std::byte> encode_identity(const std::uint64_t cluster_id,
             static_cast<std::uint16_t>(kIdentitySize));
   wire::write_u64(std::span{bytes}.subspan(8, 8), cluster_id);
   wire::write_u64(std::span{bytes}.subspan(16, 8), node_id);
-  wire::write_u32(std::span{bytes}.subspan(28, 4),
+  wire::write_u64(std::span{bytes}.subspan(24, 8), membership_fingerprint);
+  wire::write_u32(std::span{bytes}.subspan(36, 4),
                   checksum_without_tail(bytes));
   return bytes;
 }
 
 void verify_identity(const std::span<const std::byte> bytes,
-                     const std::uint64_t cluster_id, const NodeId node_id) {
+                     const std::uint64_t cluster_id, const NodeId node_id,
+                     const std::uint64_t membership_fingerprint) {
   if (bytes.size() != kIdentitySize ||
       wire::read_u32(bytes.subspan(0, 4)) != kIdentityMagic ||
       read_u16(bytes.subspan(4, 2)) != kFormatVersion ||
       read_u16(bytes.subspan(6, 2)) != kIdentitySize ||
       wire::read_u64(bytes.subspan(8, 8)) != cluster_id ||
       wire::read_u64(bytes.subspan(16, 8)) != node_id ||
-      wire::read_u32(bytes.subspan(24, 4)) != 0 ||
-      wire::read_u32(bytes.subspan(28, 4)) !=
+      wire::read_u64(bytes.subspan(24, 8)) != membership_fingerprint ||
+      wire::read_u32(bytes.subspan(32, 4)) != 0 ||
+      wire::read_u32(bytes.subspan(36, 4)) !=
           checksum_without_tail(bytes)) {
     throw_corruption("invalid Raft initialized identity marker");
   }
@@ -298,8 +302,9 @@ std::optional<HardRecord> decode_hard_state(
                     flags == 1 ? std::optional<NodeId>{vote} : std::nullopt};
 }
 
-std::vector<std::byte> encode_log_header(const std::uint64_t cluster_id,
-                                         const NodeId node_id) {
+std::vector<std::byte> encode_log_header(
+    const std::uint64_t cluster_id, const NodeId node_id,
+    const std::uint64_t membership_fingerprint) {
   std::vector<std::byte> bytes(kLogHeaderSize);
   wire::write_u32(std::span{bytes}.subspan(0, 4), kLogMagic);
   write_u16(std::span{bytes}.subspan(4, 2), kFormatVersion);
@@ -307,20 +312,22 @@ std::vector<std::byte> encode_log_header(const std::uint64_t cluster_id,
             static_cast<std::uint16_t>(kLogHeaderSize));
   wire::write_u64(std::span{bytes}.subspan(8, 8), cluster_id);
   wire::write_u64(std::span{bytes}.subspan(16, 8), node_id);
+  wire::write_u64(std::span{bytes}.subspan(24, 8), membership_fingerprint);
   wire::write_u32(std::span{bytes}.subspan(32, 4),
                   checksum_without_tail(bytes));
   return bytes;
 }
 
 void verify_log_header(const std::span<const std::byte> bytes,
-                       const std::uint64_t cluster_id, const NodeId node_id) {
+                       const std::uint64_t cluster_id, const NodeId node_id,
+                       const std::uint64_t membership_fingerprint) {
   if (bytes.size() != kLogHeaderSize ||
       wire::read_u32(bytes.subspan(0, 4)) != kLogMagic ||
       read_u16(bytes.subspan(4, 2)) != kFormatVersion ||
       read_u16(bytes.subspan(6, 2)) != kLogHeaderSize ||
       wire::read_u64(bytes.subspan(8, 8)) != cluster_id ||
       wire::read_u64(bytes.subspan(16, 8)) != node_id ||
-      wire::read_u64(bytes.subspan(24, 8)) != 0 ||
+      wire::read_u64(bytes.subspan(24, 8)) != membership_fingerprint ||
       wire::read_u32(bytes.subspan(32, 4)) !=
           checksum_without_tail(bytes)) {
     throw_corruption("invalid Raft journal header or node identity");
@@ -471,6 +478,7 @@ struct RaftStorage::Impl final {
   std::filesystem::path directory;
   std::uint64_t cluster_id{};
   NodeId node_id{};
+  std::uint64_t membership_fingerprint{};
   int log_descriptor{-1};
   int lock_descriptor{-1};
   int pending_descriptor{-1};
@@ -504,7 +512,8 @@ bool path_exists(const std::filesystem::path& path) {
 
 void read_and_verify_identity(const std::filesystem::path& path,
                               const std::uint64_t cluster_id,
-                              const NodeId node_id) {
+                              const NodeId node_id,
+                              const std::uint64_t membership_fingerprint) {
   const auto descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (descriptor < 0) {
     throw_io("open Raft initialized identity marker");
@@ -522,10 +531,14 @@ void read_and_verify_identity(const std::filesystem::path& path,
     throw;
   }
   close_file(descriptor);
+  if (metadata.st_size == 32) {
+    throw_corruption(
+        "Raft format version 1 requires offline migration or data wipe");
+  }
   if (read != bytes.size() || metadata.st_size != kIdentitySize) {
     throw_corruption("truncated Raft initialized identity marker");
   }
-  verify_identity(bytes, cluster_id, node_id);
+  verify_identity(bytes, cluster_id, node_id, membership_fingerprint);
 }
 
 bool is_recognized_temporary_name(const std::string_view name) {
@@ -634,7 +647,8 @@ void recover_log(ImplType& impl) {
   if (read_at(impl.log_descriptor, header, 0) != header.size()) {
     throw_corruption("cannot read Raft journal header");
   }
-  verify_log_header(header, impl.cluster_id, impl.node_id);
+  verify_log_header(header, impl.cluster_id, impl.node_id,
+                    impl.membership_fingerprint);
 
   std::uint64_t offset = kLogHeaderSize;
   while (offset < file_size) {
@@ -681,7 +695,8 @@ void recover_log(ImplType& impl) {
 RaftStorage RaftStorage::open(const std::filesystem::path& directory,
                               const std::uint64_t cluster_id,
                               const NodeId node_id,
-                              RaftStorageSyncHook sync_hook) {
+                              RaftStorageSyncHook sync_hook,
+                              const std::uint64_t membership_fingerprint) {
   if (cluster_id == 0 || node_id == 0) {
     throw_invalid("Raft storage cluster and node IDs must be nonzero");
   }
@@ -710,6 +725,7 @@ RaftStorage RaftStorage::open(const std::filesystem::path& directory,
   impl->directory = directory;
   impl->cluster_id = cluster_id;
   impl->node_id = node_id;
+  impl->membership_fingerprint = membership_fingerprint;
   impl->sync_hook = std::move(sync_hook);
   const auto lock_path = directory / "LOCK";
   impl->lock_descriptor =
@@ -737,7 +753,8 @@ RaftStorage RaftStorage::open(const std::filesystem::path& directory,
   const bool hard_b_existed = path_exists(hard_b_path);
   const bool log_existed = path_exists(log_path);
   if (identity_existed) {
-    read_and_verify_identity(identity_path, cluster_id, node_id);
+    read_and_verify_identity(identity_path, cluster_id, node_id,
+                             membership_fingerprint);
     if (!hard_a_existed || !hard_b_existed || !log_existed) {
       throw_corruption("initialized Raft store is missing a durable artifact");
     }
@@ -793,7 +810,8 @@ RaftStorage RaftStorage::open(const std::filesystem::path& directory,
         selected->voted_for.has_value()) {
       throw_corruption("Raft journal is missing from a non-pristine store");
     }
-    const auto header = encode_log_header(cluster_id, node_id);
+    const auto header =
+        encode_log_header(cluster_id, node_id, membership_fingerprint);
     atomically_create_file(directory, log_path, header);
   }
   impl->log_descriptor =
@@ -818,7 +836,8 @@ RaftStorage RaftStorage::open(const std::filesystem::path& directory,
   sync_file(impl->log_descriptor);
   sync_directory(directory);
   if (!identity_existed) {
-    const auto identity = encode_identity(cluster_id, node_id);
+    const auto identity =
+        encode_identity(cluster_id, node_id, membership_fingerprint);
     atomically_create_file(directory, identity_path, identity);
   }
   remove_stale_temporary_files(directory);

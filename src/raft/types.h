@@ -130,10 +130,18 @@ using Action =
 using Actions = std::vector<Action>;
 
 struct PeerProgress final {
+  struct RpcRange final {
+    RpcId rpc_id{};
+    LogIndex last_index{};
+
+    bool operator==(const RpcRange&) const = default;
+  };
+
   LogIndex next_index{1};
   LogIndex match_index{};
   RpcId newest_rpc_id{};
   LogIndex newest_rpc_last_index{};
+  std::vector<RpcRange> recent_rpcs;
 
   bool operator==(const PeerProgress&) const = default;
 };
@@ -146,6 +154,8 @@ struct RaftConfig final {
   LogicalTime election_timeout_max{};
   LogicalTime heartbeat_interval{};
   std::uint64_t random_seed{};
+  std::size_t max_append_entries{4096};
+  std::size_t max_append_bytes{1'049'768};
 };
 
 struct RaftPersistentState final {

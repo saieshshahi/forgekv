@@ -45,6 +45,19 @@ add_library(forgekv_sim STATIC
 target_link_libraries(forgekv_sim PUBLIC forgekv_raft)
 target_include_directories(forgekv_sim PUBLIC "${PROJECT_SOURCE_DIR}/src")
 
+add_library(forgekv_cluster STATIC
+  cluster/codecs.cpp
+  cluster/node.cpp
+)
+target_link_libraries(forgekv_cluster PUBLIC forgekv_net forgekv_raft)
+target_include_directories(forgekv_cluster PUBLIC "${PROJECT_SOURCE_DIR}/src")
+
+add_executable(forgekv_server
+  server/forgekv_server_main.cpp
+)
+set_target_properties(forgekv_server PROPERTIES OUTPUT_NAME "forgekv-server")
+target_link_libraries(forgekv_server PRIVATE forgekv_cluster)
+
 add_executable(forgekv_raft_sim
   sim/raft_sim_main.cpp
 )

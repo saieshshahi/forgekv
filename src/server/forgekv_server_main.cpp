@@ -1,0 +1,109 @@
+#include "cluster/node.h"
+
+#include <chrono>
+#include <csignal>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace {
+
+volatile std::sig_atomic_t stop_requested = 0;
+
+void request_stop(const int) { stop_requested = 1; }
+
+std::uint64_t parse_u64(const std::string& text, const char* field) {
+  std::size_t consumed = 0;
+  const auto value = std::stoull(text, &consumed);
+  if (consumed != text.size()) {
+    throw std::invalid_argument(std::string("invalid ") + field);
+  }
+  return value;
+}
+
+std::uint16_t parse_port(const std::string& text, const char* field) {
+  const auto value = parse_u64(text, field);
+  if (value == 0 || value > std::numeric_limits<std::uint16_t>::max()) {
+    throw std::invalid_argument(std::string("invalid ") + field);
+  }
+  return static_cast<std::uint16_t>(value);
+}
+
+std::uint32_t parse_u32(const std::string& text, const char* field) {
+  const auto value = parse_u64(text, field);
+  if (value == 0 || value > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::invalid_argument(std::string("invalid ") + field);
+  }
+  return static_cast<std::uint32_t>(value);
+}
+
+void usage() {
+  std::cerr
+      << "usage: forgekv-server --cluster-id ID --node-id ID --data-dir PATH "
+         "--client-port PORT --peer-port PORT "
+         "--peer ID=HOST:PEER_PORT:CLIENT_PORT [--peer ...] "
+         "(bracket IPv6 hosts) "
+         "[--bind ADDRESS] [--client-timeout-ms MILLISECONDS]\n";
+}
+
+}  // namespace
+
+int main(const int argc, char** argv) {
+  try {
+    forgekv::cluster::ClusterNodeConfig config;
+    for (int index = 1; index < argc; ++index) {
+      const std::string_view argument(argv[index]);
+      if (index + 1 >= argc) {
+        usage();
+        return 2;
+      }
+      const std::string value(argv[++index]);
+      if (argument == "--cluster-id") {
+        config.cluster_id = parse_u64(value, "cluster ID");
+      } else if (argument == "--node-id") {
+        config.node_id = parse_u64(value, "node ID");
+      } else if (argument == "--data-dir") {
+        config.data_directory = value;
+      } else if (argument == "--client-port") {
+        config.client_port = parse_port(value, "client port");
+      } else if (argument == "--peer-port") {
+        config.peer_port = parse_port(value, "peer port");
+      } else if (argument == "--peer") {
+        config.peers.push_back(forgekv::cluster::parse_peer_address(value));
+      } else if (argument == "--bind") {
+        config.bind_address = value;
+      } else if (argument == "--client-timeout-ms") {
+        config.client_timeout_ms = parse_u32(value, "client timeout");
+      } else {
+        usage();
+        return 2;
+      }
+    }
+
+    forgekv::cluster::ClusterNode node(std::move(config));
+    if (const auto error = node.start(); error.has_value()) {
+      std::cerr << "forgekv-server startup failed: " << *error << '\n';
+      return 1;
+    }
+    std::signal(SIGINT, request_stop);
+    std::signal(SIGTERM, request_stop);
+    std::cout << "READY client_port=" << node.client_port()
+              << " peer_port=" << node.peer_port() << std::endl;
+    while (stop_requested == 0 && !node.failed()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    const bool failed = node.failed();
+    node.stop();
+    return failed ? 1 : 0;
+  } catch (const std::exception& error) {
+    std::cerr << "forgekv-server: " << error.what() << '\n';
+    return 2;
+  }
+}

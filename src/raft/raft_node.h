@@ -8,6 +8,8 @@
 
 namespace forgekv::raft {
 
+void validate_raft_config(const RaftConfig& config);
+
 class RaftNode final {
  public:
   explicit RaftNode(RaftConfig config);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "protocol/frame.h"
 #include "raft/types.h"
 
 #include <filesystem>
@@ -9,7 +10,8 @@
 
 namespace forgekv::raft {
 
-inline constexpr std::size_t kMaxRaftCommandSize = 1024U * 1024U;
+inline constexpr std::size_t kMaxRaftCommandSize =
+    protocol::kMaxClientCommandSize;
 inline constexpr std::size_t kMaxRaftLogEntriesPerRecord = 4096U;
 inline constexpr std::size_t kMaxRaftLogRecordSize = 64U * 1024U * 1024U;
 
@@ -41,7 +43,8 @@ class RaftStorage final {
   [[nodiscard]] static RaftStorage open(const std::filesystem::path& directory,
                                         std::uint64_t cluster_id,
                                         NodeId node_id,
-                                        RaftStorageSyncHook sync_hook = {});
+                                        RaftStorageSyncHook sync_hook = {},
+                                        std::uint64_t membership_fingerprint = 0);
 
   ~RaftStorage();
   RaftStorage(RaftStorage&&) noexcept;

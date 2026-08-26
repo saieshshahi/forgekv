@@ -12,7 +12,9 @@
 namespace forgekv::raft {
 namespace {
 
-void validate_config(const RaftConfig& config) {
+constexpr std::size_t kMaximumTrackedRpcsPerPeer = 64U;
+
+void validate_config_impl(const RaftConfig& config) {
   if (config.voters.size() < 3 || config.voters.size() > 7 ||
       config.voters.size() % 2 == 0) {
     throw std::invalid_argument("Raft requires 3, 5, or 7 voters");
@@ -34,6 +36,9 @@ void validate_config(const RaftConfig& config) {
       config.heartbeat_interval >= config.election_timeout_min) {
     throw std::invalid_argument(
         "heartbeat interval must be below minimum election timeout");
+  }
+  if (config.max_append_entries == 0 || config.max_append_bytes < 24U) {
+    throw std::invalid_argument("invalid AppendEntries batch limits");
   }
 }
 
@@ -68,6 +73,10 @@ void validate_persistent_state(const RaftConfig& config,
 
 }  // namespace
 
+void validate_raft_config(const RaftConfig& config) {
+  validate_config_impl(config);
+}
+
 struct RaftNode::Impl final {
   Impl(RaftConfig value, RaftPersistentState persistent,
        const LogicalTime initial_time)
@@ -77,7 +86,7 @@ struct RaftNode::Impl final {
         now(initial_time),
         random(config.random_seed ^
                (config.self_id * 0x9E3779B97F4A7C15ULL)) {
-    validate_config(config);
+    validate_raft_config(config);
     validate_persistent_state(config, persistent);
     log.push_back(LogEntry{
         .index = 0,
@@ -150,8 +159,15 @@ struct RaftNode::Impl final {
           progress.match_index > last_log_index() ||
           progress.next_index < progress.match_index + 1 ||
           progress.next_index > last_log_index() + 1 ||
-          progress.newest_rpc_last_index > last_log_index()) {
+          progress.newest_rpc_last_index > last_log_index() ||
+          progress.recent_rpcs.size() > kMaximumTrackedRpcsPerPeer) {
         invalid("Raft leader peer progress is out of bounds");
+      }
+      for (const auto& rpc : progress.recent_rpcs) {
+        if (rpc.rpc_id == 0 || rpc.rpc_id > progress.newest_rpc_id ||
+            rpc.last_index > last_log_index()) {
+          invalid("Raft leader RPC history is out of bounds");
+        }
       }
     }
   }
@@ -199,12 +215,32 @@ struct RaftNode::Impl final {
     const auto previous_index = progress.next_index - 1;
     const auto previous_term =
         log.at(static_cast<std::size_t>(previous_index)).term;
-    std::vector<LogEntry> entries(
-        log.begin() + static_cast<std::ptrdiff_t>(progress.next_index),
-        log.end());
+    std::vector<LogEntry> entries;
+    std::size_t encoded_bytes = 0;
+    for (auto position = static_cast<std::size_t>(progress.next_index);
+         position < log.size() &&
+         entries.size() < config.max_append_entries;
+         ++position) {
+      const auto entry_bytes = 24U + log[position].command.size();
+      if (!entries.empty() &&
+          (encoded_bytes >= config.max_append_bytes ||
+           entry_bytes > config.max_append_bytes - encoded_bytes)) {
+        break;
+      }
+      entries.push_back(log[position]);
+      encoded_bytes += entry_bytes;
+    }
     const auto rpc_id = next_rpc_id++;
     progress.newest_rpc_id = rpc_id;
-    progress.newest_rpc_last_index = last_log_index();
+    progress.newest_rpc_last_index =
+        entries.empty() ? previous_index : entries.back().index;
+    progress.recent_rpcs.push_back(PeerProgress::RpcRange{
+        .rpc_id = rpc_id,
+        .last_index = progress.newest_rpc_last_index,
+    });
+    if (progress.recent_rpcs.size() > kMaximumTrackedRpcsPerPeer) {
+      progress.recent_rpcs.erase(progress.recent_rpcs.begin());
+    }
     actions.push_back(SendMessage{
         .to = peer,
         .message = AppendEntries{
@@ -255,6 +291,7 @@ struct RaftNode::Impl final {
                                           .match_index = 0,
                                           .newest_rpc_id = 0,
                                           .newest_rpc_last_index = 0,
+                                          .recent_rpcs = {},
                                       });
       }
     }
@@ -270,6 +307,9 @@ struct RaftNode::Impl final {
   }
 
   void start_election() {
+    if (current_term == std::numeric_limits<Term>::max()) {
+      throw std::overflow_error("Raft term space exhausted");
+    }
     const auto previous_role = role;
     ++current_term;
     role = Role::candidate;
@@ -509,20 +549,31 @@ struct RaftNode::Impl final {
       return;
     }
     auto& progress = found->second;
-    if (response.rpc_id != progress.newest_rpc_id) {
+    const auto rpc = std::ranges::find_if(
+        progress.recent_rpcs, [&response](const PeerProgress::RpcRange& sent) {
+          return sent.rpc_id == response.rpc_id;
+        });
+    if (rpc == progress.recent_rpcs.end()) {
       return;
     }
 
     if (response.success) {
-      const auto reported =
-          std::min(response.match_index, progress.newest_rpc_last_index);
+      const auto reported = std::min(response.match_index, rpc->last_index);
+      progress.recent_rpcs.erase(rpc);
       progress.match_index = std::max(progress.match_index, reported);
       progress.next_index = progress.match_index + 1;
       if (advance_leader_commit()) {
         broadcast_append_entries();
+      } else if (progress.next_index <= last_log_index()) {
+        send_append_entries(from);
       }
       return;
     }
+
+    if (response.rpc_id != progress.newest_rpc_id) {
+      return;
+    }
+    progress.recent_rpcs.erase(rpc);
 
     const auto minimum_next = progress.match_index + 1;
     const auto one_back = progress.next_index > 1 ? progress.next_index - 1 : 1;

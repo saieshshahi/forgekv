@@ -105,6 +105,57 @@ TEST(PersistedRaftNodeTest, VoteGrantIsPublishedOnlyAfterDurableSync) {
   EXPECT_EQ(node.durable_state().voted_for, 2U);
 }
 
+TEST(PersistedRaftNodeTest, RestartRejectsChangedFixedMembership) {
+  DriverDirectory directory;
+  {
+    auto node = PersistedRaftNode::open(PersistedRaftOptions{
+        .config = driver_config(),
+        .data_directory = directory.path(),
+        .initial_time = 0,
+        .output = [](const Action&) {},
+        .crash_hook = {},
+    });
+    EXPECT_FALSE(node.failed());
+  }
+
+  auto changed = driver_config();
+  changed.voters = {1, 2, 4};
+  EXPECT_THROW(
+      static_cast<void>(PersistedRaftNode::open(PersistedRaftOptions{
+          .config = changed,
+          .data_directory = directory.path(),
+          .initial_time = 0,
+          .output = [](const Action&) {},
+          .crash_hook = {},
+      })),
+      RaftStorageError);
+}
+
+TEST(PersistedRaftNodeTest, InvalidConfigCannotInitializeStorage) {
+  DriverDirectory directory;
+  auto invalid = driver_config();
+  invalid.voters = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+  EXPECT_THROW(
+      static_cast<void>(PersistedRaftNode::open(PersistedRaftOptions{
+          .config = invalid,
+          .data_directory = directory.path(),
+          .initial_time = 0,
+          .output = [](const Action&) {},
+          .crash_hook = {},
+      })),
+      std::invalid_argument);
+  EXPECT_TRUE(std::filesystem::is_empty(directory.path()));
+
+  auto node = PersistedRaftNode::open(PersistedRaftOptions{
+      .config = driver_config(),
+      .data_directory = directory.path(),
+      .initial_time = 0,
+      .output = [](const Action&) {},
+      .crash_hook = {},
+  });
+  EXPECT_FALSE(node.failed());
+}
+
 TEST(PersistedRaftNodeTest, StorageAndDriverShareOneStatefulCrashHook) {
   DriverDirectory directory;
   std::vector<std::size_t> observations;

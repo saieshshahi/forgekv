@@ -50,6 +50,8 @@ The configured build targets are:
 - `forgekv_common`: shared, narrowly scoped primitives such as logging;
 - `forgekv_raft`: deterministic Raft core plus its crash-safe persistence
   driver with durable term/vote/log ordering;
+- `forgekv_cluster` and `forgekv-server`: bounded TCP transport and a real
+  multi-process Raft-backed KV service;
 - `forgekv_sim` and `forgekv_raft_sim`: deterministic cluster simulator library
   and seeded stress runner;
 - `forgekv_unit_tests`: GoogleTest unit test executable; and
@@ -146,13 +148,13 @@ documented in [`docs/storage.md`](docs/storage.md).
 The matrix covers PUT, GET, DELETE, and recovery across supported value sizes
 and reports throughput, tail latency, byte rate, and process CPU utilization.
 
-## Current scope
+## Real cluster
 
-The implementation proceeds in phases. The pure Raft core, deterministic fault
-simulator, and crash-safe local Raft persistence driver are implemented, but
-Raft is not yet connected to the production network path. See
+Phase 9 connects the persisted Raft core to separate client and peer TCP
+listeners. Its exact write-success and read-consistency contracts, local
+three-node invocation, and failover test are documented in
+[`docs/cluster.md`](docs/cluster.md). See also
 [`docs/raft.md`](docs/raft.md),
 [`docs/raft-simulator.md`](docs/raft-simulator.md), and
 [`docs/raft-persistence.md`](docs/raft-persistence.md), plus
-[`docs/architecture.md`](docs/architecture.md) for the current and target
-systems.
+[`docs/architecture.md`](docs/architecture.md).
