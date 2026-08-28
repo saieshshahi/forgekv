@@ -23,14 +23,16 @@ happened:
 
 Local append, sending an RPC, or receiving one follower response is not success.
 If leadership is lost before application, the request returns `BUSY`; the
-client must discover the leader and retry. Followers return `REDIRECT` with the
-known leader's client endpoint, or `BUSY` while no leader is known. Phase 12
-adds deterministic retry deduplication; until then, retrying a timed-out
-mutation can append a second equivalent command.
+client must discover the leader and retry the exact same logical mutation.
+Followers return `REDIRECT` with the known leader's client endpoint, or `BUSY`
+while no leader is known. Replicated request deduplication gives conforming
+clients an at-most-once state-machine effect across response loss, failover,
+restart, and snapshots; its limits are documented in
+[`request-deduplication.md`](request-deduplication.md).
 
-Phase 9 `GET` is deliberately a local, eventual read on any node. This makes
-follower catch-up observable but is not a linearizable-read claim. Phase 10
-replaces this with a quorum-backed linearizable read barrier.
+`GET` is leader-only and uses a committed Raft barrier before reading the state
+machine. Followers never return local values. This deliberately favors clearly
+linearizable semantics over the lower cost of a future ReadIndex optimization.
 
 ## Peer transport
 
@@ -88,5 +90,7 @@ checks follower redirects, commits writes, and verifies a restarted follower can
 rejoin after a large bounded-batch catch-up. It then keeps the old leader's
 client port live while partitioning only peer traffic, elects a replacement,
 commits a new value, and proves stale GETs cannot return data. The test also
-checks pending-read admission remains bounded after client timeout, heals the
-partition, and inspects the former leader's durable log for the new value.
+checks pending-read admission remains bounded after client timeout, drops a
+committed mutation response and retries it after snapshot installation and
+failover, rejects changed and stale retry IDs, heals the partition, and
+inspects the former leader's durable log for the new value.

@@ -1,6 +1,6 @@
 # ForgeKV Wire Protocol Version 1
 
-Status: Phase 9 implemented format
+Status: Phase 12 implemented format
 
 ## 1. Framing
 
@@ -49,8 +49,8 @@ Client namespace (`01`):
 | `83` | REDIRECT | response |
 | `84` | BUSY | response |
 
-Raft namespace (`02`) uses `40` for AppendEntries and its response and `41` for
-RequestVote and its response. `42` is reserved for InstallSnapshot in Phase 11.
+Raft namespace (`02`) uses `40` for AppendEntries and its response, `41` for
+RequestVote and its response, and `42` for chunked InstallSnapshot traffic.
 The payload begins with a fixed peer envelope containing `cluster_id`, source
 node ID, destination node ID, and an explicit request/response discriminator,
 followed by the bounded message body. Using a type in the wrong namespace is a
@@ -95,6 +95,20 @@ Version 1 response payloads are:
 - `ERROR`: `u16 code`, `u16 message_length`, then bounded UTF-8 diagnostic.
 - `REDIRECT`: `u16 endpoint_length`, then UTF-8 `host:port`.
 - `BUSY`: `u32 retry_after_ms`, where zero means no estimate.
+
+Stable `ERROR` codes are:
+
+| Code | Meaning | Retry policy |
+|---:|---|---|
+| 1 | malformed or invalid client request | fix the request |
+| 2 | replicated operation failed internally | outcome may be unknown; inspect node health |
+| 3 | request ID reused with different command bytes | permanent; allocate the next ID correctly |
+| 4 | request ID is older than the retained ID | permanent for that request |
+| 5 | deduplication retention would exceed 1,024 identities or 64 MiB of command/result bytes | reduce active identity/command retention or wait for a future session-reclamation mechanism |
+
+`BUSY` and `REDIRECT` are transport/leadership outcomes, not deduplication
+results. See [`request-deduplication.md`](request-deduplication.md) for the
+mutation retry contract.
 
 ## 4. Incremental parser behavior
 

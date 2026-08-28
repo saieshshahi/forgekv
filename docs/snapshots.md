@@ -9,7 +9,9 @@ with `--snapshot-threshold ENTRIES`.
 `raft.snapshot` binds the image to the cluster ID, node ID, and fixed-membership
 fingerprint. Its fixed header records the format version, `lastIncludedIndex`,
 `lastIncludedTerm`, payload length, header checksum, and payload checksum. The
-payload is a deterministic encoding of the key/value state, sorted by key.
+payload is a deterministic encoding of the key/value state sorted by key and
+the request-deduplication table sorted by client ID. The payload format is
+version 2; the decoder accepts version 1 key/value-only payloads for upgrades.
 
 Recovery loads and verifies the snapshot before replaying `raft-log.wal`. The
 journal header names the older boundary from which its retained records must be
@@ -33,7 +35,8 @@ before its covered log prefix is removed.
 
 ## Request pause and background work
 
-The Raft owner briefly copies the current key/value map at an applied log
+The Raft owner briefly copies the current key/value map and deduplication table
+at an applied log
 boundary. Encoding, checksum calculation, file writes, and syncs run on a
 background worker. The owner publishes the completed snapshot into Raft only
 after the file is durable. Snapshot publication is monotonic, so a delayed

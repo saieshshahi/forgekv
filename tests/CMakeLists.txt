@@ -16,6 +16,7 @@ add_executable(forgekv_unit_tests
   unit/serializer_test.cpp
   unit/snapshot_store_test.cpp
   unit/snapshot_codec_test.cpp
+  unit/state_machine_test.cpp
   unit/smoke_test.cpp
   unit/wal_test.cpp
   unit/wal_record_test.cpp

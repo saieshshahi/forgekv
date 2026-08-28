@@ -50,6 +50,7 @@ add_library(forgekv_cluster STATIC
   cluster/codecs.cpp
   cluster/node.cpp
   cluster/snapshot_codec.cpp
+  cluster/state_machine.cpp
 )
 target_link_libraries(forgekv_cluster PUBLIC forgekv_net forgekv_raft)
 target_include_directories(forgekv_cluster PUBLIC "${PROJECT_SOURCE_DIR}/src")

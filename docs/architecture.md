@@ -224,7 +224,7 @@ state still allows a safe retry.
 leader receives PUT / DELETE
           |
           v
-construct command {client_id, request_id, fingerprint, operation}
+construct command {client_id, request_id, exact canonical bytes, operation}
           |
           v
 append at (index, current_term) -----> leader WAL append + group fdatasync
@@ -259,12 +259,12 @@ rule; older entries become committed transitively when a current-term entry is
 committed.
 
 The state machine stores, for each client, the highest accepted request ID, its
-command fingerprint, and its result. Initial clients must serialize mutations
+exact canonical command bytes, and its result. Initial clients must serialize mutations
 per `client_id` and assign monotonically increasing IDs:
 
 - ID greater than the stored ID: apply once and replace the dedup record.
-- ID equal with the same fingerprint: return the stored result; do not mutate.
-- ID equal with a different fingerprint: return a permanent request-ID-reuse
+- ID equal with the same canonical bytes: return the stored result; do not mutate.
+- ID equal with different canonical bytes: return a permanent request-ID-reuse
   error.
 - ID lower than the stored ID: return a permanent stale-request error.
 
@@ -450,7 +450,7 @@ requirement.
 | 3 | Recovery accepts torn/corrupt data | silent state divergence | checksums, strict index validation, fail-closed policy, corpus and fuzz tests |
 | 4 | ReadIndex mistake | stale value returned as linearizable | model tests across partitions and leadership changes; never substitute a lease initially |
 | 5 | Queue or buffer growth | out-of-memory under overload or slow peers | item and byte caps at every boundary; backpressure integration and soak tests |
-| 6 | Deduplication ambiguity | retry applies a mutation twice or rejects a valid request | serialized client contract, replicated fingerprints/results, crash/retry history tests |
+| 6 | Deduplication ambiguity | retry applies a mutation twice or rejects a valid request | serialized client contract, replicated canonical commands/results, crash/retry history tests |
 | 7 | Snapshot/WAL race | missing entries or premature log deletion | publication protocol, index/term checks, crash injection at every snapshot step |
 | 8 | Shutdown lifetime race | use-after-free, lost completion, deadlock | explicit ownership, connection generations, phased joins, sanitizer stress tests |
 | 9 | Single-thread bottleneck | high tail latency or election instability under load | priority for Raft messages, bounded executor work, metrics, profile before sharding |

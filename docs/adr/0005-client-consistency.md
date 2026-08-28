@@ -59,16 +59,17 @@ Every mutation carries:
 
 - `client_id`: a stable, high-entropy client identity;
 - `request_id`: a monotonically increasing integer within that identity; and
-- a command fingerprint covering operation, key, value, and semantic options.
+- exact canonical command bytes covering operation, key, value, and semantic
+  options.
 
 Initial clients must allow only one unresolved mutation per `client_id`. A retry
 uses the same request ID and exact command. The replicated state machine stores
-the highest processed request ID, its fingerprint, and its result for each
+the highest processed request ID, its canonical bytes, and its result for each
 admitted client:
 
-| Incoming ID | Fingerprint | Result |
+| Incoming ID | Canonical command | Result |
 |---|---|---|
-| greater than stored | any valid | apply command once; store ID, fingerprint, and result |
+| greater than stored | any valid | apply command once; store ID, command, and result |
 | equal to stored | equal | return stored result without changing user state |
 | equal to stored | different | permanent `REQUEST_ID_REUSE` error; no mutation |
 | less than stored | any | permanent `STALE_REQUEST` error; no mutation |
@@ -78,10 +79,11 @@ earlier cache check. Consequently two leaders or duplicate log entries cannot
 apply the logical command twice.
 
 Deduplication state is included in snapshots and restored before service. It is
-never evicted by a local LRU or wall-clock TTL. A configured maximum number of
-client identities bounds memory; new identities receive `BUSY`/resource-limit
-errors at capacity. Safe reclamation requires a future replicated session-close
-or epoch protocol.
+never evicted by a local LRU or wall-clock TTL. Initial fixed limits of 1,024
+client identities and 64 MiB of retained command/result bytes bound memory; a
+request that would exceed either limit receives stable resource-limit `ERROR`
+code 5 before user-state mutation. Safe reclamation requires a future replicated
+session-close or epoch protocol.
 
 `GET` carries transport correlation but does not require mutation deduplication.
 

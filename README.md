@@ -91,6 +91,8 @@ All ForgeKV targets compile with:
   use a replicated barrier and compares the future ReadIndex and lease options.
 - [`docs/snapshots.md`](docs/snapshots.md) defines snapshot publication,
   recovery, log compaction, and follower installation.
+- [`docs/request-deduplication.md`](docs/request-deduplication.md) defines safe
+  mutation retries and their retention limits.
 - [`docs/raft-persistence.md`](docs/raft-persistence.md) defines the durable
   identity, hard-state, and log formats.
 

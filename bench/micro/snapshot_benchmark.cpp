@@ -17,11 +17,12 @@ namespace {
 
 SnapshotState dataset(const std::size_t entries) {
   SnapshotState state;
-  state.reserve(entries);
+  state.values.reserve(entries);
   for (std::size_t index = 0; index < entries; ++index) {
-    state.emplace("snapshot-key-" + std::to_string(index),
-                  std::vector<std::byte>(64U,
-                                         static_cast<std::byte>(index & 0xFFU)));
+    state.values.emplace(
+        "snapshot-key-" + std::to_string(index),
+        std::vector<std::byte>(64U,
+                               static_cast<std::byte>(index & 0xFFU)));
   }
   return state;
 }

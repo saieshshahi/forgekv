@@ -247,6 +247,14 @@ std::optional<protocol::Frame> request(const std::uint16_t port,
   }
 }
 
+bool send_without_reading_response(const std::uint16_t port,
+                                   const protocol::Frame& frame) {
+  auto socket = connect_to(port);
+  const auto encoded = protocol::serialize(frame);
+  return socket.valid() && encoded.ok() &&
+         send_all(socket.get(), encoded.bytes);
+}
+
 void copy_text(const std::string& text,
                const std::span<std::byte> destination) {
   std::ranges::transform(text, destination.begin(), [](const char character) {
@@ -254,12 +262,25 @@ void copy_text(const std::string& text,
   });
 }
 
-protocol::Frame put(const std::uint64_t request_id, const std::string& key,
-                    const std::string& value) {
-  std::vector<std::byte> payload(24U + key.size() + value.size());
-  for (std::size_t index = 0; index < 16U; ++index) {
-    payload[index] = static_cast<std::byte>(index + 1U);
+ClientId default_client() {
+  ClientId id{};
+  for (std::size_t index = 0; index < id.size(); ++index) {
+    id[index] = static_cast<std::byte>(index + 1U);
   }
+  return id;
+}
+
+ClientId repeated_client(const std::uint8_t value) {
+  ClientId id{};
+  std::ranges::fill(id, static_cast<std::byte>(value));
+  return id;
+}
+
+protocol::Frame put_for(const ClientId& client_id,
+                        const std::uint64_t request_id,
+                        const std::string& key, const std::string& value) {
+  std::vector<std::byte> payload(24U + key.size() + value.size());
+  std::ranges::copy(client_id, payload.begin());
   protocol::wire::write_u32(std::span{payload}.subspan(16, 4),
                             static_cast<std::uint32_t>(key.size()));
   protocol::wire::write_u32(std::span{payload}.subspan(20, 4),
@@ -269,6 +290,26 @@ protocol::Frame put(const std::uint64_t request_id, const std::string& key,
             std::span{payload}.subspan(24U + key.size(), value.size()));
   return protocol::Frame{.message_namespace = protocol::Namespace::client,
                          .message_type = protocol::MessageType::put,
+                         .flags = 0,
+                         .request_id = request_id,
+                         .payload = std::move(payload)};
+}
+
+protocol::Frame put(const std::uint64_t request_id, const std::string& key,
+                    const std::string& value) {
+  return put_for(default_client(), request_id, key, value);
+}
+
+protocol::Frame delete_for(const ClientId& client_id,
+                           const std::uint64_t request_id,
+                           const std::string& key) {
+  std::vector<std::byte> payload(20U + key.size());
+  std::ranges::copy(client_id, payload.begin());
+  protocol::wire::write_u32(std::span{payload}.subspan(16, 4),
+                            static_cast<std::uint32_t>(key.size()));
+  copy_text(key, std::span{payload}.subspan(20));
+  return protocol::Frame{.message_namespace = protocol::Namespace::client,
+                         .message_type = protocol::MessageType::delete_key,
                          .flags = 0,
                          .request_id = request_id,
                          .payload = std::move(payload)};
@@ -323,6 +364,30 @@ bool wait_for_value(const std::uint16_t port, const std::string& key,
     std::this_thread::sleep_for(100ms);
   }
   return false;
+}
+
+bool wait_for_missing(const std::uint16_t port, const std::string& key,
+                      std::uint64_t& request_id) {
+  const auto deadline = std::chrono::steady_clock::now() + 15s;
+  while (std::chrono::steady_clock::now() < deadline) {
+    const auto response = request(port, get(++request_id, key));
+    if (response.has_value() &&
+        response->message_type == protocol::MessageType::not_found) {
+      return true;
+    }
+    std::this_thread::sleep_for(100ms);
+  }
+  return false;
+}
+
+std::optional<std::uint16_t> error_code(const protocol::Frame& frame) {
+  if (frame.message_type != protocol::MessageType::error ||
+      frame.payload.size() < 2U) {
+    return std::nullopt;
+  }
+  return static_cast<std::uint16_t>(
+      (std::to_integer<std::uint16_t>(frame.payload[0]) << 8U) |
+      std::to_integer<std::uint16_t>(frame.payload[1]));
 }
 
 std::optional<std::string> wait_for_redirect(
@@ -389,8 +454,8 @@ bool durable_has_put(const std::filesystem::path& directory,
     const auto snapshot =
         decode_snapshot_state(storage.state().snapshot->state_machine);
     if (snapshot.ok()) {
-      const auto found = snapshot.value->find(key);
-      if (found != snapshot.value->end()) {
+      const auto found = snapshot.value->values.find(key);
+      if (found != snapshot.value->values.end()) {
         const std::string stored(
             reinterpret_cast<const char*>(found->second.data()),
             found->second.size());
@@ -436,12 +501,31 @@ bool published_snapshot_has_put(const std::filesystem::path& directory,
   if (!decoded.ok()) {
     return false;
   }
-  const auto found = decoded.value->find(key);
-  if (found == decoded.value->end()) {
+  const auto found = decoded.value->values.find(key);
+  if (found == decoded.value->values.end()) {
     return false;
   }
   return std::string(reinterpret_cast<const char*>(found->second.data()),
                      found->second.size()) == value;
+}
+
+bool published_snapshot_has_request(const std::filesystem::path& directory,
+                                    const raft::NodeId node_id,
+                                    const ClientId& client_id,
+                                    const std::uint64_t request_id) {
+  const auto snapshot = raft::SnapshotStore::load(
+      directory, 4242, node_id,
+      raft::fixed_membership_fingerprint({1, 2, 3}));
+  if (!snapshot.has_value()) {
+    return false;
+  }
+  const auto decoded = decode_snapshot_state(snapshot->state_machine);
+  if (!decoded.ok()) {
+    return false;
+  }
+  const auto found = decoded.value->clients.find(client_id);
+  return found != decoded.value->clients.end() &&
+         found->second.request_id == request_id;
 }
 
 bool journal_requires_snapshot(const std::filesystem::path& directory) {
@@ -568,6 +652,17 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
   ASSERT_TRUE(response.has_value());
   ASSERT_EQ(response->message_type, protocol::MessageType::ok);
 
+  response = request(client_ports[*first_leader],
+                     put(++request_id, "dedup-target", "present"));
+  ASSERT_TRUE(response.has_value());
+  ASSERT_EQ(response->message_type, protocol::MessageType::ok);
+  const auto retry_client = repeated_client(0xD1);
+  const auto dropped_delete = delete_for(retry_client, 1, "dedup-target");
+  ASSERT_TRUE(send_without_reading_response(client_ports[*first_leader],
+                                            dropped_delete));
+  ASSERT_TRUE(wait_for_missing(client_ports[*first_leader], "dedup-target",
+                               request_id));
+
   processes[follower]->kill9();
   const std::string large_value(600U * 1024U, 'z');
   for (const auto* key : {"large-one", "large-two"}) {
@@ -594,6 +689,9 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
       static_cast<raft::NodeId>(*first_leader + 1U), "large-two", large_value,
       &leader_snapshot_size));
   ASSERT_GT(leader_snapshot_size, 1024U * 1024U);
+  ASSERT_TRUE(published_snapshot_has_request(
+      node_directories[*first_leader],
+      static_cast<raft::NodeId>(*first_leader + 1U), retry_client, 1));
   snapshot_deadline = std::chrono::steady_clock::now() + 10s;
   while (!journal_requires_snapshot(node_directories[*first_leader]) &&
          std::chrono::steady_clock::now() < snapshot_deadline) {
@@ -613,6 +711,9 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
   ASSERT_TRUE(published_snapshot_has_put(
       node_directories[follower],
       static_cast<raft::NodeId>(follower + 1U), "large-two", large_value));
+  ASSERT_TRUE(published_snapshot_has_request(
+      node_directories[follower], static_cast<raft::NodeId>(follower + 1U),
+      retry_client, 1));
   ASSERT_TRUE(processes[follower]->start());
   ASSERT_TRUE(wait_for_value(client_ports[*first_leader], "large-two",
                              large_value, request_id));
@@ -629,6 +730,28 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
   ASSERT_EQ(response->message_type, protocol::MessageType::ok);
   ASSERT_TRUE(wait_for_value(client_ports[*second_leader], "beta", "two",
                              request_id));
+
+  response = request(client_ports[*second_leader], dropped_delete);
+  ASSERT_TRUE(response.has_value());
+  ASSERT_EQ(response->message_type, protocol::MessageType::ok);
+  ASSERT_EQ(response->payload,
+            (std::vector<std::byte>{std::byte{1}}));
+
+  response = request(client_ports[*second_leader],
+                     delete_for(retry_client, 1, "alpha"));
+  ASSERT_TRUE(response.has_value());
+  EXPECT_EQ(error_code(*response), 3U);
+
+  response = request(client_ports[*second_leader],
+                     put_for(retry_client, 3, "dedup-next", "accepted"));
+  ASSERT_TRUE(response.has_value());
+  ASSERT_EQ(response->message_type, protocol::MessageType::ok);
+  response = request(client_ports[*second_leader],
+                     put_for(retry_client, 2, "dedup-stale", "rejected"));
+  ASSERT_TRUE(response.has_value());
+  EXPECT_EQ(error_code(*response), 4U);
+  ASSERT_TRUE(wait_for_missing(client_ports[*second_leader], "dedup-stale",
+                               request_id));
 
   const auto first_stale_id = ++request_id;
   auto first_stale_read = std::async(std::launch::async, [&] {
@@ -655,8 +778,8 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
 
   processes[*first_leader]->toggle_peer_partition();
   bool caught_up = false;
-  for (int attempt = 0; attempt < 20 && !caught_up; ++attempt) {
-    std::this_thread::sleep_for(200ms);
+  for (int attempt = 0; attempt < 40 && !caught_up; ++attempt) {
+    std::this_thread::sleep_for(500ms);
     processes[*first_leader]->kill9();
     caught_up = durable_has_put(node_directories[*first_leader],
                                 static_cast<raft::NodeId>(*first_leader + 1U),

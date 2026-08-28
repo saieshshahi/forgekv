@@ -2,6 +2,7 @@
 
 #include "cluster/codecs.h"
 #include "cluster/snapshot_codec.h"
+#include "cluster/state_machine.h"
 #include "protocol/parser.h"
 #include "protocol/serializer.h"
 #include "protocol/wire.h"
@@ -261,7 +262,16 @@ std::size_t peer_work_bytes(const raft::SendMessage& work) {
       work.message);
 }
 
-enum class ClientStatus { ok, not_found, redirect, retry, failed };
+enum class ClientStatus {
+  ok,
+  not_found,
+  redirect,
+  retry,
+  failed,
+  request_id_reuse,
+  stale_request,
+  capacity_exceeded,
+};
 
 struct ClientResult final {
   ClientStatus status{ClientStatus::failed};
@@ -640,7 +650,6 @@ class ClusterNode::Impl final {
   using Work = std::variant<Proposal, Read, PeerRequest, PeerResponse>;
 
   struct PendingMutation final {
-    KvOperation operation{KvOperation::put};
     std::vector<std::byte> command;
     std::shared_ptr<std::promise<ClientResult>> completion;
   };
@@ -747,6 +756,14 @@ class ClusterNode::Impl final {
         return busy_response(request);
       case ClientStatus::failed:
         return error_response(request, 2, "replicated operation failed");
+      case ClientStatus::request_id_reuse:
+        return error_response(request, 3,
+                              "request ID reused with different command");
+      case ClientStatus::stale_request:
+        return error_response(request, 4, "stale request ID");
+      case ClientStatus::capacity_exceeded:
+        return error_response(request, 5,
+                              "deduplication retention capacity reached");
     }
     return error_response(request, 2, "unknown operation result");
   }
@@ -864,7 +881,7 @@ class ClusterNode::Impl final {
           throw std::runtime_error("invalid durable state-machine snapshot: " +
                                    decoded.error);
         }
-        state_machine_ = std::move(*decoded.value);
+        state_machine_.restore(std::move(*decoded.value));
       }
       role_ = snapshot.role;
       leader_id_ = snapshot.leader_id;
@@ -943,10 +960,8 @@ class ClusterNode::Impl final {
                            : static_cast<raft::LogIndex>(snapshot.log.size()) +
                                  1U;
     auto encoded = encode_replicated_command(proposal.command);
-    pending_.emplace(index,
-                     PendingMutation{.operation = proposal.command.operation,
-                                     .command = encoded,
-                                     .completion = proposal.completion});
+    pending_.emplace(index, PendingMutation{.command = encoded,
+                                            .completion = proposal.completion});
     active_proposal_index_ = index;
     node_->propose(std::move(encoded));
     active_proposal_index_.reset();
@@ -1043,7 +1058,7 @@ class ClusterNode::Impl final {
         throw std::runtime_error("installed invalid state-machine snapshot: " +
                                  decoded.error);
       }
-      state_machine_ = std::move(*decoded.value);
+      state_machine_.restore(std::move(*decoded.value));
       last_snapshot_index_ = apply->snapshot.last_included_index;
       fail_pending(ClientStatus::retry);
       return;
@@ -1093,8 +1108,8 @@ class ClusterNode::Impl final {
                              .leader_endpoint = {}});
             continue;
           }
-          const auto value = state_machine_.find(read.key);
-          if (value == state_machine_.end()) {
+          const auto* value = state_machine_.find(read.key);
+          if (value == nullptr) {
             read.completion->set_value(
                 ClientResult{.status = ClientStatus::not_found,
                              .value = {},
@@ -1102,7 +1117,7 @@ class ClusterNode::Impl final {
           } else {
             read.completion->set_value(
                 ClientResult{.status = ClientStatus::ok,
-                             .value = value->second,
+                             .value = *value,
                              .leader_endpoint = {}});
           }
         }
@@ -1115,12 +1130,7 @@ class ClusterNode::Impl final {
       throw std::runtime_error("committed invalid state-machine command: " +
                                decoded.error);
     }
-    bool existed = false;
-    if (decoded.value->operation == KvOperation::put) {
-      state_machine_[decoded.value->key] = decoded.value->value;
-    } else {
-      existed = state_machine_.erase(decoded.value->key) != 0;
-    }
+    const auto result = state_machine_.apply(*decoded.value, entry.command);
     const auto pending = pending_.find(entry.index);
     if (pending != pending_.end()) {
       if (pending->second.command != entry.command) {
@@ -1132,13 +1142,24 @@ class ClusterNode::Impl final {
         pending_.erase(pending);
         return;
       }
-      std::vector<std::byte> result;
-      if (pending->second.operation == KvOperation::delete_key) {
-        result.push_back(existed ? std::byte{1} : std::byte{0});
+      ClientStatus status = ClientStatus::ok;
+      switch (result.status) {
+        case MutationApplyStatus::applied:
+        case MutationApplyStatus::duplicate:
+          break;
+        case MutationApplyStatus::request_id_reuse:
+          status = ClientStatus::request_id_reuse;
+          break;
+        case MutationApplyStatus::stale_request:
+          status = ClientStatus::stale_request;
+          break;
+        case MutationApplyStatus::capacity_exceeded:
+          status = ClientStatus::capacity_exceeded;
+          break;
       }
       pending->second.completion->set_value(
-          ClientResult{.status = ClientStatus::ok,
-                       .value = std::move(result),
+          ClientResult{.status = status,
+                       .value = result.response,
                        .leader_endpoint = {}});
       pending_.erase(pending);
     }
@@ -1150,7 +1171,7 @@ class ClusterNode::Impl final {
         index - last_snapshot_index_ < config_.snapshot_threshold) {
       return;
     }
-    auto state_copy = state_machine_;
+    auto state_copy = state_machine_.snapshot();
     const auto directory = config_.data_directory;
     const auto cluster_id = config_.cluster_id;
     const auto node_id = config_.node_id;
@@ -1271,7 +1292,7 @@ class ClusterNode::Impl final {
   std::optional<raft::LogIndex> active_read_barrier_index_;
   std::unordered_map<raft::LogIndex, PendingMutation> pending_;
   std::unordered_map<raft::LogIndex, std::vector<PendingRead>> pending_reads_;
-  std::unordered_map<std::string, std::vector<std::byte>> state_machine_;
+  ReplicatedStateMachine state_machine_;
   std::optional<std::future<raft::StateMachineSnapshot>> snapshot_future_;
   raft::LogIndex last_snapshot_index_{};
   std::atomic<bool> failed_{};
