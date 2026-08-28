@@ -53,7 +53,7 @@ void usage() {
          "--peer ID=HOST:PEER_PORT:CLIENT_PORT [--peer ...] "
          "(bracket IPv6 hosts) "
          "[--bind ADDRESS] [--client-timeout-ms MILLISECONDS] "
-         "[--max-pending-reads COUNT]\n";
+         "[--max-pending-reads COUNT] [--snapshot-threshold ENTRIES]\n";
 }
 
 }  // namespace
@@ -86,6 +86,8 @@ int main(const int argc, char** argv) {
         config.client_timeout_ms = parse_u32(value, "client timeout");
       } else if (argument == "--max-pending-reads") {
         config.max_pending_reads = parse_u32(value, "maximum pending reads");
+      } else if (argument == "--snapshot-threshold") {
+        config.snapshot_threshold = parse_u32(value, "snapshot threshold");
       } else {
         usage();
         return 2;

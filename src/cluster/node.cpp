@@ -1,10 +1,12 @@
 #include "cluster/node.h"
 
 #include "cluster/codecs.h"
+#include "cluster/snapshot_codec.h"
 #include "protocol/parser.h"
 #include "protocol/serializer.h"
 #include "protocol/wire.h"
 #include "raft/persisted_raft_node.h"
+#include "raft/snapshot_store.h"
 #include "server/tcp_server.h"
 
 #include <arpa/inet.h>
@@ -217,13 +219,19 @@ std::optional<protocol::Frame> receive_one_frame(const int descriptor) {
 
 bool is_request_message(const raft::Message& message) {
   return std::holds_alternative<raft::RequestVote>(message) ||
-         std::holds_alternative<raft::AppendEntries>(message);
+         std::holds_alternative<raft::AppendEntries>(message) ||
+         std::holds_alternative<raft::InstallSnapshot>(message);
 }
 
 bool matches_peer_request(const raft::Message& request,
                           const raft::Message& response) {
   if (std::holds_alternative<raft::RequestVote>(request)) {
     return std::holds_alternative<raft::RequestVoteResponse>(response);
+  }
+  if (const auto* snapshot = std::get_if<raft::InstallSnapshot>(&request)) {
+    const auto* reply = std::get_if<raft::InstallSnapshotResponse>(&response);
+    return reply != nullptr && reply->rpc_id == snapshot->rpc_id &&
+           reply->last_included_index == snapshot->last_included_index;
   }
   const auto* append = std::get_if<raft::AppendEntries>(&request);
   const auto* reply = std::get_if<raft::AppendEntriesResponse>(&response);
@@ -245,6 +253,8 @@ std::size_t peer_work_bytes(const raft::SendMessage& work) {
           for (const auto& entry : message.entries) {
             size += sizeof(raft::LogEntry) + entry.command.size();
           }
+        } else if constexpr (std::is_same_v<Type, raft::InstallSnapshot>) {
+          size += message.data.size();
         }
         return size;
       },
@@ -667,6 +677,7 @@ class ClusterNode::Impl final {
         config_.peer_queue_byte_capacity == 0 ||
         config_.peer_worker_threads == 0 ||
         config_.max_pending_reads == 0 ||
+        config_.snapshot_threshold == 0 ||
         config_.rpc_timeout_ms == 0 || config_.client_timeout_ms == 0) {
       return "invalid zero/empty cluster configuration";
     }
@@ -846,8 +857,20 @@ class ClusterNode::Impl final {
               .crash_hook = {},
           }));
       const auto snapshot = node_->snapshot();
+      if (snapshot.durable_snapshot.has_value()) {
+        auto decoded = decode_snapshot_state(
+            snapshot.durable_snapshot->state_machine);
+        if (!decoded.ok()) {
+          throw std::runtime_error("invalid durable state-machine snapshot: " +
+                                   decoded.error);
+        }
+        state_machine_ = std::move(*decoded.value);
+      }
       role_ = snapshot.role;
       leader_id_ = snapshot.leader_id;
+      last_snapshot_index_ = snapshot.durable_snapshot.has_value()
+                                 ? snapshot.durable_snapshot->last_included_index
+                                 : 0;
     } catch (const std::exception& error) {
       {
         const std::lock_guard lock(startup_mutex_);
@@ -893,6 +916,7 @@ class ClusterNode::Impl final {
         if (work.has_value()) {
           std::visit([this](auto& typed) { process(typed); }, *work);
         }
+        poll_snapshot_creation();
       } catch (const std::exception&) {
         fail_pending(ClientStatus::failed);
         failed_.store(true, std::memory_order_release);
@@ -913,7 +937,11 @@ class ClusterNode::Impl final {
       });
       return;
     }
-    const auto index = static_cast<raft::LogIndex>(snapshot.log.size()) + 1U;
+    const auto index = snapshot.durable_snapshot.has_value()
+                           ? snapshot.durable_snapshot->last_included_index +
+                                 snapshot.log.size() + 1U
+                           : static_cast<raft::LogIndex>(snapshot.log.size()) +
+                                 1U;
     auto encoded = encode_replicated_command(proposal.command);
     pending_.emplace(index,
                      PendingMutation{.operation = proposal.command.operation,
@@ -955,7 +983,11 @@ class ClusterNode::Impl final {
                         .completion = read.completion,
                         .canceled = read.canceled,
                         .deadline = read.deadline};
-    const auto index = static_cast<raft::LogIndex>(snapshot.log.size()) + 1U;
+    const auto index = snapshot.durable_snapshot.has_value()
+                           ? snapshot.durable_snapshot->last_included_index +
+                                 snapshot.log.size() + 1U
+                           : static_cast<raft::LogIndex>(snapshot.log.size()) +
+                                 1U;
     pending_reads_.emplace(index, std::vector<PendingRead>{std::move(pending)});
     active_read_barrier_index_ = index;
     node_->read_barrier();
@@ -1002,6 +1034,18 @@ class ClusterNode::Impl final {
     }
     if (const auto* apply = std::get_if<raft::ApplyEntry>(&action)) {
       apply_entry(apply->entry);
+      maybe_start_snapshot(apply->entry.index, apply->entry.term);
+      return;
+    }
+    if (const auto* apply = std::get_if<raft::ApplySnapshot>(&action)) {
+      auto decoded = decode_snapshot_state(apply->snapshot.state_machine);
+      if (!decoded.ok()) {
+        throw std::runtime_error("installed invalid state-machine snapshot: " +
+                                 decoded.error);
+      }
+      state_machine_ = std::move(*decoded.value);
+      last_snapshot_index_ = apply->snapshot.last_included_index;
+      fail_pending(ClientStatus::retry);
       return;
     }
     if (std::holds_alternative<raft::ProposalRejected>(action) &&
@@ -1100,6 +1144,66 @@ class ClusterNode::Impl final {
     }
   }
 
+  void maybe_start_snapshot(const raft::LogIndex index,
+                            const raft::Term term) {
+    if (snapshot_future_.has_value() || index <= last_snapshot_index_ ||
+        index - last_snapshot_index_ < config_.snapshot_threshold) {
+      return;
+    }
+    auto state_copy = state_machine_;
+    const auto directory = config_.data_directory;
+    const auto cluster_id = config_.cluster_id;
+    const auto node_id = config_.node_id;
+    std::vector<raft::NodeId> voters;
+    voters.reserve(config_.peers.size());
+    for (const auto& peer : config_.peers) {
+      voters.push_back(peer.node_id);
+    }
+    const auto membership = raft::fixed_membership_fingerprint(voters);
+    snapshot_future_.emplace(std::async(
+        std::launch::async,
+        [directory, cluster_id, node_id, membership, index, term,
+         state = std::move(state_copy)]() mutable {
+          raft::StateMachineSnapshot snapshot{
+              .last_included_index = index,
+              .last_included_term = term,
+              .state_machine = encode_snapshot_state(state),
+          };
+          raft::SnapshotStore::write_atomic(directory, cluster_id, node_id,
+                                            membership, snapshot);
+          return snapshot;
+        }));
+  }
+
+  void poll_snapshot_creation() {
+    if (!snapshot_future_.has_value() ||
+        snapshot_future_->wait_for(std::chrono::seconds(0)) !=
+            std::future_status::ready) {
+      return;
+    }
+    auto completed = snapshot_future_->get();
+    snapshot_future_.reset();
+    const auto current = node_->snapshot();
+    const auto current_base = current.durable_snapshot.has_value()
+                                  ? current.durable_snapshot->last_included_index
+                                  : raft::LogIndex{0};
+    if (completed.last_included_index <= current_base) {
+      return;
+    }
+    node_->compact(std::move(completed), true);
+    last_snapshot_index_ = node_->snapshot().durable_snapshot->last_included_index;
+    const auto after_compaction = node_->snapshot();
+    if (after_compaction.last_applied > last_snapshot_index_) {
+      const auto applied = std::ranges::find_if(
+          after_compaction.log, [&after_compaction](const raft::LogEntry& entry) {
+            return entry.index == after_compaction.last_applied;
+          });
+      if (applied != after_compaction.log.end()) {
+        maybe_start_snapshot(applied->index, applied->term);
+      }
+    }
+  }
+
   void fail_pending(const ClientStatus status) {
     for (auto& [index, pending] : pending_) {
       static_cast<void>(index);
@@ -1168,6 +1272,8 @@ class ClusterNode::Impl final {
   std::unordered_map<raft::LogIndex, PendingMutation> pending_;
   std::unordered_map<raft::LogIndex, std::vector<PendingRead>> pending_reads_;
   std::unordered_map<std::string, std::vector<std::byte>> state_machine_;
+  std::optional<std::future<raft::StateMachineSnapshot>> snapshot_future_;
+  raft::LogIndex last_snapshot_index_{};
   std::atomic<bool> failed_{};
 };
 

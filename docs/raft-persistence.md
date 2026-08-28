@@ -79,19 +79,29 @@ renames it over the inactive slot, and calls `fsync` on the directory. Only then
 does that generation become the driver's durable state. A crash before rename
 leaves the previous named generations intact. Generation overflow fails closed.
 
-## Log journal format, version 2
+## Log journal format, version 3
 
-The 36-byte journal header is:
+The 52-byte journal header is:
 
 | Offset | Size | Field |
 |---:|---:|---|
 | 0 | 4 | magic `FRLG` |
-| 4 | 2 | format version (`2`) |
-| 6 | 2 | header size (`36`) |
+| 4 | 2 | format version (`3`) |
+| 6 | 2 | header size (`52`) |
 | 8 | 8 | cluster ID |
 | 16 | 8 | node ID |
 | 24 | 8 | canonical fixed-voter fingerprint |
-| 32 | 4 | CRC32 over bytes 0–31 |
+| 32 | 8 | required snapshot index, or zero for an uncompacted journal |
+| 40 | 8 | required snapshot term, or zero for an uncompacted journal |
+| 48 | 4 | CRC32 over bytes 0–47 |
+
+A compacted journal records its replay boundary here. Recovery requires a
+published snapshot at or beyond that boundary. When the published snapshot is
+newer because its journal replacement had not yet been renamed at the crash,
+recovery replays from the older declared boundary and validates the final log
+at the newer snapshot's index and term before trimming. An uncompacted header
+with a zero boundary is handled by the same rule. A missing, older, or
+term-conflicting snapshot fails closed.
 
 Each following transaction describes one suffix replacement.
 
@@ -142,9 +152,11 @@ that node rejoin from a surviving quorum. A production upgrade tool must
 preserve the old bytes, atomically publish every version 2 artifact, and be
 separately crash-tested before in-place upgrades are supported.
 
-The single journal is the Phase 8 correctness baseline. Phase 11 snapshots and
-compaction will bound it and introduce segment/manifest publication as described
-by ADR 0003.
+Phase 11 changes only the journal header to version 3 so compacted storage can
+name its required snapshot boundary. Identity, hard-state, and transaction
+records remain version 2. This pre-release repository likewise requires an
+offline rebuild when opening an older journal; a production migration must
+atomically establish the new header/snapshot relationship.
 
 ## Required ordering
 

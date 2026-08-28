@@ -1,9 +1,11 @@
 #include "cluster/codecs.h"
+#include "cluster/snapshot_codec.h"
 #include "protocol/parser.h"
 #include "protocol/serializer.h"
 #include "protocol/wire.h"
 #include "raft/persisted_raft_node.h"
 #include "raft/raft_storage.h"
+#include "raft/snapshot_store.h"
 
 #include <gtest/gtest.h>
 
@@ -23,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <optional>
@@ -382,6 +385,21 @@ bool durable_has_put(const std::filesystem::path& directory,
   auto storage = raft::RaftStorage::open(
       directory, 4242, node_id, {},
       raft::fixed_membership_fingerprint({1, 2, 3}));
+  if (storage.state().snapshot.has_value()) {
+    const auto snapshot =
+        decode_snapshot_state(storage.state().snapshot->state_machine);
+    if (snapshot.ok()) {
+      const auto found = snapshot.value->find(key);
+      if (found != snapshot.value->end()) {
+        const std::string stored(
+            reinterpret_cast<const char*>(found->second.data()),
+            found->second.size());
+        if (stored == value) {
+          return true;
+        }
+      }
+    }
+  }
   for (const auto& entry : storage.state().log) {
     if (entry.kind != raft::EntryKind::command) {
       continue;
@@ -398,6 +416,41 @@ bool durable_has_put(const std::filesystem::path& directory,
     }
   }
   return false;
+}
+
+bool published_snapshot_has_put(const std::filesystem::path& directory,
+                                const raft::NodeId node_id,
+                                const std::string& key,
+                                const std::string& value,
+                                std::size_t* payload_size = nullptr) {
+  const auto snapshot = raft::SnapshotStore::load(
+      directory, 4242, node_id,
+      raft::fixed_membership_fingerprint({1, 2, 3}));
+  if (!snapshot.has_value()) {
+    return false;
+  }
+  if (payload_size != nullptr) {
+    *payload_size = snapshot->state_machine.size();
+  }
+  const auto decoded = decode_snapshot_state(snapshot->state_machine);
+  if (!decoded.ok()) {
+    return false;
+  }
+  const auto found = decoded.value->find(key);
+  if (found == decoded.value->end()) {
+    return false;
+  }
+  return std::string(reinterpret_cast<const char*>(found->second.data()),
+                     found->second.size()) == value;
+}
+
+bool journal_requires_snapshot(const std::filesystem::path& directory) {
+  std::ifstream input(directory / "raft-log.wal", std::ios::binary);
+  std::array<std::byte, 40> header{};
+  input.read(reinterpret_cast<char*>(header.data()),
+             static_cast<std::streamsize>(header.size()));
+  return input && protocol::wire::read_u64(
+                      std::span<const std::byte>{header}.subspan(32, 8)) != 0;
 }
 
 TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
@@ -432,6 +485,7 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
         std::to_string(client_ports[index]), "--peer-port",
         std::to_string(peer_ports[index]), "--client-timeout-ms", "3000",
         "--max-pending-reads", "1",
+        "--snapshot-threshold", "2",
     };
     for (const auto& peer : peer_arguments) {
       arguments.push_back("--peer");
@@ -522,6 +576,43 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
     ASSERT_TRUE(response.has_value());
     ASSERT_EQ(response->message_type, protocol::MessageType::ok);
   }
+  response = request(client_ports[*first_leader],
+                     put(++request_id, "snapshot-trigger", "committed"));
+  ASSERT_TRUE(response.has_value());
+  ASSERT_EQ(response->message_type, protocol::MessageType::ok);
+  auto snapshot_deadline = std::chrono::steady_clock::now() + 10s;
+  std::size_t leader_snapshot_size = 0;
+  while (!published_snapshot_has_put(
+             node_directories[*first_leader],
+             static_cast<raft::NodeId>(*first_leader + 1U), "large-two",
+             large_value, &leader_snapshot_size) &&
+         std::chrono::steady_clock::now() < snapshot_deadline) {
+    std::this_thread::sleep_for(50ms);
+  }
+  ASSERT_TRUE(published_snapshot_has_put(
+      node_directories[*first_leader],
+      static_cast<raft::NodeId>(*first_leader + 1U), "large-two", large_value,
+      &leader_snapshot_size));
+  ASSERT_GT(leader_snapshot_size, 1024U * 1024U);
+  snapshot_deadline = std::chrono::steady_clock::now() + 10s;
+  while (!journal_requires_snapshot(node_directories[*first_leader]) &&
+         std::chrono::steady_clock::now() < snapshot_deadline) {
+    std::this_thread::sleep_for(50ms);
+  }
+  ASSERT_TRUE(journal_requires_snapshot(node_directories[*first_leader]));
+  ASSERT_TRUE(processes[follower]->start());
+  snapshot_deadline = std::chrono::steady_clock::now() + 15s;
+  while (!published_snapshot_has_put(
+             node_directories[follower],
+             static_cast<raft::NodeId>(follower + 1U), "large-two",
+             large_value) &&
+         std::chrono::steady_clock::now() < snapshot_deadline) {
+    std::this_thread::sleep_for(100ms);
+  }
+  processes[follower]->kill9();
+  ASSERT_TRUE(published_snapshot_has_put(
+      node_directories[follower],
+      static_cast<raft::NodeId>(follower + 1U), "large-two", large_value));
   ASSERT_TRUE(processes[follower]->start());
   ASSERT_TRUE(wait_for_value(client_ports[*first_leader], "large-two",
                              large_value, request_id));

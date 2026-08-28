@@ -89,6 +89,8 @@ All ForgeKV targets compile with:
   runtime and fixed-membership transport contract.
 - [`docs/linearizable-reads.md`](docs/linearizable-reads.md) documents why GETs
   use a replicated barrier and compares the future ReadIndex and lease options.
+- [`docs/snapshots.md`](docs/snapshots.md) defines snapshot publication,
+  recovery, log compaction, and follower installation.
 - [`docs/raft-persistence.md`](docs/raft-persistence.md) defines the durable
   identity, hard-state, and log formats.
 
@@ -165,5 +167,6 @@ three-node invocation, and failover test are documented in
 [`docs/cluster.md`](docs/cluster.md). See also
 [`docs/raft.md`](docs/raft.md),
 [`docs/raft-simulator.md`](docs/raft-simulator.md), and
-[`docs/raft-persistence.md`](docs/raft-persistence.md), plus
+[`docs/raft-persistence.md`](docs/raft-persistence.md),
+[`docs/snapshots.md`](docs/snapshots.md), plus
 [`docs/architecture.md`](docs/architecture.md).

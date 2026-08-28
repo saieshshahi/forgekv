@@ -2,6 +2,7 @@
 
 #include "protocol/checksum.h"
 #include "protocol/wire.h"
+#include "raft/snapshot_store.h"
 
 #include <algorithm>
 #include <array>
@@ -31,9 +32,10 @@ constexpr std::uint32_t kIdentityMagic = 0x46524944U;
 constexpr std::uint32_t kLogMagic = 0x46524C47U;
 constexpr std::uint32_t kLogRecordMagic = 0x46524C52U;
 constexpr std::uint16_t kFormatVersion = 2U;
+constexpr std::uint16_t kLogFormatVersion = 3U;
 constexpr std::size_t kHardStateSize = 60U;
 constexpr std::size_t kIdentitySize = 40U;
-constexpr std::size_t kLogHeaderSize = 36U;
+constexpr std::size_t kLogHeaderSize = 52U;
 constexpr std::size_t kLogRecordHeaderSize = 32U;
 constexpr std::size_t kEntryHeaderSize = 24U;
 
@@ -186,16 +188,29 @@ std::pair<int, std::filesystem::path> open_temporary_file(
 
 void atomically_create_file(const std::filesystem::path& directory,
                             const std::filesystem::path& destination,
-                            const std::span<const std::byte> contents) {
+                            const std::span<const std::byte> contents,
+                            const RaftStorageSyncHook& hook = {}) {
   auto [descriptor, temporary] =
       open_temporary_file(directory, destination.filename().string());
   try {
     write_all(descriptor, contents);
+    if (hook) {
+      hook(RaftStorageSyncPoint::after_write);
+    }
     sync_file(descriptor);
+    if (hook) {
+      hook(RaftStorageSyncPoint::after_file_sync);
+    }
     close_file(std::exchange(descriptor, -1));
     rename_file(temporary, destination);
     temporary.clear();
+    if (hook) {
+      hook(RaftStorageSyncPoint::after_rename);
+    }
     sync_directory(directory);
+    if (hook) {
+      hook(RaftStorageSyncPoint::after_directory_sync);
+    }
   } catch (...) {
     close_file(descriptor);
     unlink_file(temporary);
@@ -304,34 +319,50 @@ std::optional<HardRecord> decode_hard_state(
 
 std::vector<std::byte> encode_log_header(
     const std::uint64_t cluster_id, const NodeId node_id,
-    const std::uint64_t membership_fingerprint) {
+    const std::uint64_t membership_fingerprint,
+    const std::optional<StateMachineSnapshot>& required_snapshot =
+        std::nullopt) {
   std::vector<std::byte> bytes(kLogHeaderSize);
   wire::write_u32(std::span{bytes}.subspan(0, 4), kLogMagic);
-  write_u16(std::span{bytes}.subspan(4, 2), kFormatVersion);
+  write_u16(std::span{bytes}.subspan(4, 2), kLogFormatVersion);
   write_u16(std::span{bytes}.subspan(6, 2),
             static_cast<std::uint16_t>(kLogHeaderSize));
   wire::write_u64(std::span{bytes}.subspan(8, 8), cluster_id);
   wire::write_u64(std::span{bytes}.subspan(16, 8), node_id);
   wire::write_u64(std::span{bytes}.subspan(24, 8), membership_fingerprint);
-  wire::write_u32(std::span{bytes}.subspan(32, 4),
+  wire::write_u64(std::span{bytes}.subspan(32, 8),
+                  required_snapshot.has_value()
+                      ? required_snapshot->last_included_index
+                      : 0);
+  wire::write_u64(std::span{bytes}.subspan(40, 8),
+                  required_snapshot.has_value()
+                      ? required_snapshot->last_included_term
+                      : 0);
+  wire::write_u32(std::span{bytes}.subspan(48, 4),
                   checksum_without_tail(bytes));
   return bytes;
 }
 
-void verify_log_header(const std::span<const std::byte> bytes,
-                       const std::uint64_t cluster_id, const NodeId node_id,
-                       const std::uint64_t membership_fingerprint) {
+std::optional<std::pair<LogIndex, Term>> verify_log_header(
+    const std::span<const std::byte> bytes, const std::uint64_t cluster_id,
+    const NodeId node_id, const std::uint64_t membership_fingerprint) {
+  const auto required_index = wire::read_u64(bytes.subspan(32, 8));
+  const auto required_term = wire::read_u64(bytes.subspan(40, 8));
   if (bytes.size() != kLogHeaderSize ||
       wire::read_u32(bytes.subspan(0, 4)) != kLogMagic ||
-      read_u16(bytes.subspan(4, 2)) != kFormatVersion ||
+      read_u16(bytes.subspan(4, 2)) != kLogFormatVersion ||
       read_u16(bytes.subspan(6, 2)) != kLogHeaderSize ||
       wire::read_u64(bytes.subspan(8, 8)) != cluster_id ||
       wire::read_u64(bytes.subspan(16, 8)) != node_id ||
       wire::read_u64(bytes.subspan(24, 8)) != membership_fingerprint ||
-      wire::read_u32(bytes.subspan(32, 4)) !=
-          checksum_without_tail(bytes)) {
+      wire::read_u32(bytes.subspan(48, 4)) != checksum_without_tail(bytes) ||
+      ((required_index == 0) != (required_term == 0))) {
     throw_corruption("invalid Raft journal header or node identity");
   }
+  if (required_index == 0) {
+    return std::nullopt;
+  }
+  return std::pair{required_index, required_term};
 }
 
 RaftPersistentState apply_log_update(RaftPersistentState state,
@@ -340,16 +371,26 @@ RaftPersistentState apply_log_update(RaftPersistentState state,
   const auto reject = [error_code](const std::string& message) -> void {
     throw RaftStorageError(error_code, message);
   };
+  const auto base_index = state.snapshot.has_value()
+                              ? state.snapshot->last_included_index
+                              : LogIndex{0};
+  const auto base_term = state.snapshot.has_value()
+                             ? state.snapshot->last_included_term
+                             : Term{0};
+  const auto last_index = base_index + state.log.size();
   if (update.from_index == 0 ||
-      update.from_index > state.log.size() + 1 ||
+      (update.from_index > base_index && update.from_index > last_index + 1) ||
       update.entries.size() > kMaxRaftLogEntriesPerRecord) {
     reject("invalid Raft log suffix boundary or entry count");
   }
-  Term previous_term = update.from_index > 1
-                           ? state.log[static_cast<std::size_t>(
-                                 update.from_index - 2)]
-                                 .term
-                           : 0;
+  Term previous_term = 0;
+  if (update.from_index == base_index + 1) {
+    previous_term = base_term;
+  } else if (update.from_index > base_index + 1) {
+    previous_term = state.log[static_cast<std::size_t>(
+                                  update.from_index - base_index - 2)]
+                        .term;
+  }
   LogIndex expected_index = update.from_index;
   std::size_t encoded_size = kLogRecordHeaderSize;
   for (const auto& entry : update.entries) {
@@ -366,11 +407,24 @@ RaftPersistentState apply_log_update(RaftPersistentState state,
       reject("Raft log transaction exceeds maximum size");
     }
     encoded_size += kEntryHeaderSize + entry.command.size();
+    if (entry.index == base_index && entry.term != base_term) {
+      reject("Raft log record conflicts with snapshot boundary");
+    }
     ++expected_index;
     previous_term = entry.term;
   }
-  state.log.resize(static_cast<std::size_t>(update.from_index - 1));
-  state.log.insert(state.log.end(), update.entries.begin(), update.entries.end());
+  if (update.entries.empty() || update.entries.back().index <= base_index) {
+    return state;
+  }
+  const auto retained_from = std::max(update.from_index, base_index + 1);
+  if (retained_from > last_index + 1) {
+    reject("invalid Raft log suffix after snapshot boundary");
+  }
+  const auto skip = static_cast<std::size_t>(retained_from - update.from_index);
+  state.log.resize(static_cast<std::size_t>(retained_from - base_index - 1));
+  state.log.insert(state.log.end(),
+                   update.entries.begin() + static_cast<std::ptrdiff_t>(skip),
+                   update.entries.end());
   return state;
 }
 
@@ -647,8 +701,27 @@ void recover_log(ImplType& impl) {
   if (read_at(impl.log_descriptor, header, 0) != header.size()) {
     throw_corruption("cannot read Raft journal header");
   }
-  verify_log_header(header, impl.cluster_id, impl.node_id,
-                    impl.membership_fingerprint);
+  const auto required_snapshot =
+      verify_log_header(header, impl.cluster_id, impl.node_id,
+                        impl.membership_fingerprint);
+  const auto loaded_snapshot = impl.state.snapshot;
+  auto replay_state = impl.state;
+  replay_state.log.clear();
+  if (required_snapshot.has_value()) {
+    if (!loaded_snapshot.has_value() ||
+        loaded_snapshot->last_included_index < required_snapshot->first ||
+        (loaded_snapshot->last_included_index == required_snapshot->first &&
+         loaded_snapshot->last_included_term != required_snapshot->second)) {
+      throw_corruption("Raft journal requires a missing or older snapshot");
+    }
+    replay_state.snapshot = StateMachineSnapshot{
+        .last_included_index = required_snapshot->first,
+        .last_included_term = required_snapshot->second,
+        .state_machine = {},
+    };
+  } else {
+    replay_state.snapshot.reset();
+  }
 
   std::uint64_t offset = kLogHeaderSize;
   while (offset < file_size) {
@@ -680,11 +753,36 @@ void recover_log(ImplType& impl) {
     if (read_at(impl.log_descriptor, bytes, offset) != bytes.size()) {
       throw_corruption("cannot read complete Raft journal record");
     }
-    impl.state = apply_log_update(std::move(impl.state),
-                                  decode_log_update(bytes),
-                                  RaftStorageErrorCode::corruption);
+    replay_state = apply_log_update(std::move(replay_state),
+                                    decode_log_update(bytes),
+                                    RaftStorageErrorCode::corruption);
     offset += record_size;
   }
+  if (loaded_snapshot.has_value()) {
+    const auto replay_base = required_snapshot.has_value()
+                                 ? required_snapshot->first
+                                 : LogIndex{0};
+    const auto boundary = loaded_snapshot->last_included_index;
+    const auto covered_entries = boundary - replay_base;
+    const auto boundary_matches =
+        covered_entries == 0
+            ? required_snapshot.has_value() &&
+                  required_snapshot->second ==
+                      loaded_snapshot->last_included_term
+            : covered_entries <= replay_state.log.size() &&
+                  replay_state
+                          .log[static_cast<std::size_t>(covered_entries - 1)]
+                          .term == loaded_snapshot->last_included_term;
+    if (!boundary_matches) {
+      throw_corruption("full Raft journal conflicts with snapshot boundary");
+    }
+    replay_state.log.erase(
+        replay_state.log.begin(),
+        replay_state.log.begin() +
+            static_cast<std::ptrdiff_t>(covered_entries));
+    replay_state.snapshot = loaded_snapshot;
+  }
+  impl.state = std::move(replay_state);
   if (::lseek(impl.log_descriptor, 0, SEEK_END) < 0) {
     throw_io("seek Raft journal append position");
   }
@@ -804,6 +902,12 @@ RaftStorage RaftStorage::open(const std::filesystem::path& directory,
   impl->hard_generation = selected->generation;
   impl->state.current_term = selected->term;
   impl->state.voted_for = selected->voted_for;
+  impl->state.snapshot = SnapshotStore::load(
+      directory, cluster_id, node_id, membership_fingerprint);
+  if (impl->state.snapshot.has_value() &&
+      impl->state.snapshot->last_included_term > impl->state.current_term) {
+    throw_corruption("Raft snapshot term exceeds durable hard state");
+  }
 
   if (!log_existed) {
     if (identity_existed || selected->generation != 2 || selected->term != 0 ||
@@ -911,6 +1015,104 @@ void RaftStorage::prepare(const PersistLog& update) {
   write_all(impl_->log_descriptor, encode_log_update(update));
   impl_->pending_state = std::move(next);
   impl_->pending_kind = Impl::PendingKind::log;
+}
+
+void RaftStorage::install_snapshot(const StateMachineSnapshot& snapshot,
+                                   const bool snapshot_already_durable) {
+  if (!impl_ || impl_->log_descriptor < 0) {
+    throw RaftStorageError(RaftStorageErrorCode::closed,
+                           "install snapshot on closed Raft storage");
+  }
+  if (impl_->pending_kind != Impl::PendingKind::none) {
+    throw_invalid("Raft storage already has a pending update");
+  }
+  const auto old_base = impl_->state.snapshot.has_value()
+                            ? impl_->state.snapshot->last_included_index
+                            : LogIndex{0};
+  if (snapshot.last_included_index ==
+          std::numeric_limits<LogIndex>::max() ||
+      snapshot.last_included_index <= old_base ||
+      snapshot.last_included_term == 0 ||
+      snapshot.last_included_term > impl_->state.current_term ||
+      snapshot.state_machine.size() > kMaxSnapshotPayloadSize) {
+    throw_invalid("invalid or regressing Raft snapshot");
+  }
+
+  std::vector<LogEntry> suffix;
+  const auto old_last = old_base + impl_->state.log.size();
+  if (snapshot.last_included_index <= old_last) {
+    const auto boundary = static_cast<std::size_t>(
+        snapshot.last_included_index - old_base - 1);
+    if (impl_->state.log.at(boundary).term == snapshot.last_included_term) {
+      suffix.assign(impl_->state.log.begin() +
+                        static_cast<std::ptrdiff_t>(boundary + 1),
+                    impl_->state.log.end());
+    }
+  }
+
+  if (!snapshot_already_durable) {
+    SnapshotStore::write_atomic(
+        impl_->directory, impl_->cluster_id, impl_->node_id,
+        impl_->membership_fingerprint, snapshot,
+        [this](const SnapshotWritePoint point) {
+          if (!impl_->sync_hook) {
+            return;
+          }
+          if (point == SnapshotWritePoint::after_file_sync) {
+            impl_->sync_hook(RaftStorageSyncPoint::after_file_sync);
+          } else if (point == SnapshotWritePoint::after_rename) {
+            impl_->sync_hook(RaftStorageSyncPoint::after_rename);
+          }
+        });
+  } else {
+    const auto durable = SnapshotStore::load(
+        impl_->directory, impl_->cluster_id, impl_->node_id,
+        impl_->membership_fingerprint);
+    if (!durable.has_value() || *durable != snapshot) {
+      throw_invalid("prewritten snapshot does not match compact request");
+    }
+  }
+
+  std::vector<std::byte> journal = encode_log_header(
+      impl_->cluster_id, impl_->node_id, impl_->membership_fingerprint,
+      snapshot);
+  std::size_t suffix_offset = 0;
+  while (suffix_offset < suffix.size()) {
+    std::size_t batch_size = 0;
+    std::size_t encoded_size = kLogRecordHeaderSize;
+    while (suffix_offset + batch_size < suffix.size() &&
+           batch_size < kMaxRaftLogEntriesPerRecord) {
+      const auto entry_size =
+          kEntryHeaderSize + suffix[suffix_offset + batch_size].command.size();
+      if (batch_size != 0 &&
+          entry_size > kMaxRaftLogRecordSize - encoded_size) {
+        break;
+      }
+      encoded_size += entry_size;
+      ++batch_size;
+    }
+    std::vector<LogEntry> batch{
+        suffix.begin() + static_cast<std::ptrdiff_t>(suffix_offset),
+        suffix.begin() +
+            static_cast<std::ptrdiff_t>(suffix_offset + batch_size)};
+    auto record = encode_log_update(PersistLog{
+        .from_index = snapshot.last_included_index + 1 + suffix_offset,
+        .entries = std::move(batch),
+    });
+    journal.insert(journal.end(), record.begin(), record.end());
+    suffix_offset += batch_size;
+  }
+  const auto log_path = impl_->directory / "raft-log.wal";
+  atomically_create_file(impl_->directory, log_path, journal,
+                         impl_->sync_hook);
+  close_file(std::exchange(impl_->log_descriptor, -1));
+  impl_->log_descriptor =
+      ::open(log_path.c_str(), O_RDWR | O_CLOEXEC | O_APPEND);
+  if (impl_->log_descriptor < 0) {
+    throw_io("reopen compacted Raft journal");
+  }
+  impl_->state.snapshot = snapshot;
+  impl_->state.log = std::move(suffix);
 }
 
 void RaftStorage::sync() {

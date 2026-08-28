@@ -35,6 +35,7 @@ add_library(forgekv_raft STATIC
   raft/persisted_raft_node.cpp
   raft/raft_node.cpp
   raft/raft_storage.cpp
+  raft/snapshot_store.cpp
 )
 target_link_libraries(forgekv_raft PUBLIC forgekv_common forgekv_protocol)
 target_include_directories(forgekv_raft PUBLIC "${PROJECT_SOURCE_DIR}/src")
@@ -48,6 +49,7 @@ target_include_directories(forgekv_sim PUBLIC "${PROJECT_SOURCE_DIR}/src")
 add_library(forgekv_cluster STATIC
   cluster/codecs.cpp
   cluster/node.cpp
+  cluster/snapshot_codec.cpp
 )
 target_link_libraries(forgekv_cluster PUBLIC forgekv_net forgekv_raft)
 target_include_directories(forgekv_cluster PUBLIC "${PROJECT_SOURCE_DIR}/src")

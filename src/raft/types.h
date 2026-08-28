@@ -34,6 +34,14 @@ struct LogEntry final {
   bool operator==(const LogEntry&) const = default;
 };
 
+struct StateMachineSnapshot final {
+  LogIndex last_included_index{};
+  Term last_included_term{};
+  std::vector<std::byte> state_machine;
+
+  bool operator==(const StateMachineSnapshot&) const = default;
+};
+
 struct RequestVote final {
   Term term{};
   NodeId candidate_id{};
@@ -72,8 +80,33 @@ struct AppendEntriesResponse final {
   bool operator==(const AppendEntriesResponse&) const = default;
 };
 
+struct InstallSnapshot final {
+  Term term{};
+  NodeId leader_id{};
+  LogIndex last_included_index{};
+  Term last_included_term{};
+  std::uint64_t total_size{};
+  std::uint64_t offset{};
+  std::vector<std::byte> data;
+  bool done{};
+  RpcId rpc_id{};
+
+  bool operator==(const InstallSnapshot&) const = default;
+};
+
+struct InstallSnapshotResponse final {
+  Term term{};
+  bool success{};
+  LogIndex last_included_index{};
+  std::uint64_t next_offset{};
+  RpcId rpc_id{};
+
+  bool operator==(const InstallSnapshotResponse&) const = default;
+};
+
 using Message = std::variant<RequestVote, RequestVoteResponse, AppendEntries,
-                             AppendEntriesResponse>;
+                             AppendEntriesResponse, InstallSnapshot,
+                             InstallSnapshotResponse>;
 
 struct SendMessage final {
   NodeId to{};
@@ -94,6 +127,18 @@ struct PersistLog final {
   std::vector<LogEntry> entries;
 
   bool operator==(const PersistLog&) const = default;
+};
+
+struct PersistSnapshot final {
+  StateMachineSnapshot snapshot;
+
+  bool operator==(const PersistSnapshot&) const = default;
+};
+
+struct ApplySnapshot final {
+  StateMachineSnapshot snapshot;
+
+  bool operator==(const ApplySnapshot&) const = default;
 };
 
 struct RoleChanged final {
@@ -125,8 +170,9 @@ struct ProposalRejected final {
 };
 
 using Action =
-    std::variant<SendMessage, PersistHardState, PersistLog, RoleChanged,
-                 CommitAdvanced, ApplyEntry, ProposalRejected>;
+    std::variant<SendMessage, PersistHardState, PersistLog, PersistSnapshot,
+                 RoleChanged, CommitAdvanced, ApplyEntry, ApplySnapshot,
+                 ProposalRejected>;
 using Actions = std::vector<Action>;
 
 struct PeerProgress final {
@@ -137,11 +183,23 @@ struct PeerProgress final {
     bool operator==(const RpcRange&) const = default;
   };
 
+  struct SnapshotRpcRange final {
+    RpcId rpc_id{};
+    LogIndex snapshot_index{};
+    std::uint64_t offset{};
+    std::uint64_t end{};
+
+    bool operator==(const SnapshotRpcRange&) const = default;
+  };
+
   LogIndex next_index{1};
   LogIndex match_index{};
   RpcId newest_rpc_id{};
   LogIndex newest_rpc_last_index{};
   std::vector<RpcRange> recent_rpcs;
+  LogIndex snapshot_index{};
+  std::uint64_t snapshot_offset{};
+  std::vector<SnapshotRpcRange> recent_snapshot_rpcs;
 
   bool operator==(const PeerProgress&) const = default;
 };
@@ -161,6 +219,7 @@ struct RaftConfig final {
 struct RaftPersistentState final {
   Term current_term{};
   std::optional<NodeId> voted_for;
+  std::optional<StateMachineSnapshot> snapshot;
   std::vector<LogEntry> log;
 };
 
@@ -170,6 +229,7 @@ struct RaftSnapshot final {
   Term current_term{};
   std::optional<NodeId> voted_for;
   std::optional<NodeId> leader_id;
+  std::optional<StateMachineSnapshot> durable_snapshot;
   std::vector<LogEntry> log;
   LogIndex commit_index{};
   LogIndex last_applied{};

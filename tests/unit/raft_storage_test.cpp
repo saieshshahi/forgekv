@@ -1,4 +1,5 @@
 #include "raft/raft_storage.h"
+#include "raft/snapshot_store.h"
 
 #include <gtest/gtest.h>
 
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -262,6 +264,230 @@ TEST(RaftStorageTest, ReplaysGapFreeLogAndConflictingSuffixReplacement) {
             (std::vector<LogEntry>{entry(1, 1, 0x11), entry(2, 3, 0x33)}));
 }
 
+TEST(RaftStorageTest, SnapshotCompactionPersistsBoundaryAndRetainedSuffix) {
+  TestDirectory directory;
+  const StateMachineSnapshot snapshot{
+      .last_included_index = 2,
+      .last_included_term = 2,
+      .state_machine = {std::byte{0xCA}, std::byte{0xFE}},
+  };
+  {
+    auto storage = RaftStorage::open(directory.path(), 99, 1);
+    persist(storage, PersistHardState{.term = 3, .voted_for = std::nullopt});
+    persist(storage,
+            PersistLog{.from_index = 1,
+                       .entries = {entry(1, 1, 0x11), entry(2, 2, 0x22),
+                                   entry(3, 3, 0x33)}});
+    storage.install_snapshot(snapshot);
+    EXPECT_EQ(storage.state().snapshot, snapshot);
+    EXPECT_EQ(storage.state().log,
+              (std::vector<LogEntry>{entry(3, 3, 0x33)}));
+    persist(storage,
+            PersistLog{.from_index = 4, .entries = {entry(4, 3, 0x44)}});
+  }
+
+  auto recovered = RaftStorage::open(directory.path(), 99, 1);
+  EXPECT_EQ(recovered.state().snapshot, snapshot);
+  EXPECT_EQ(recovered.state().log,
+            (std::vector<LogEntry>{entry(3, 3, 0x33),
+                                   entry(4, 3, 0x44)}));
+}
+
+TEST(RaftStorageTest, RecoveryAcceptsPublishedSnapshotWithOldFullJournal) {
+  TestDirectory directory;
+  const StateMachineSnapshot snapshot{
+      .last_included_index = 2,
+      .last_included_term = 2,
+      .state_machine = {std::byte{0x5A}},
+  };
+  bool crash_after_snapshot_rename = false;
+  {
+    auto storage = RaftStorage::open(
+        directory.path(), 99, 1,
+        [&crash_after_snapshot_rename](const RaftStorageSyncPoint point) {
+          if (crash_after_snapshot_rename &&
+              point == RaftStorageSyncPoint::after_rename) {
+            throw std::runtime_error("simulated crash after snapshot rename");
+          }
+        });
+    persist(storage, PersistHardState{.term = 3, .voted_for = std::nullopt});
+    persist(storage,
+            PersistLog{.from_index = 1,
+                       .entries = {entry(1, 1, 0x11), entry(2, 2, 0x22),
+                                   entry(3, 3, 0x33)}});
+    crash_after_snapshot_rename = true;
+    EXPECT_THROW(storage.install_snapshot(snapshot), std::runtime_error);
+  }
+
+  auto recovered = RaftStorage::open(directory.path(), 99, 1);
+  EXPECT_EQ(recovered.state().snapshot, snapshot);
+  EXPECT_EQ(recovered.state().log,
+            (std::vector<LogEntry>{entry(3, 3, 0x33)}));
+}
+
+TEST(RaftStorageTest,
+     RecoveryValidatesFinalOverwrittenBoundaryBeforeUsingPublishedSnapshot) {
+  TestDirectory directory;
+  const StateMachineSnapshot snapshot{
+      .last_included_index = 2,
+      .last_included_term = 2,
+      .state_machine = {std::byte{0x5B}},
+  };
+  {
+    auto storage = RaftStorage::open(directory.path(), 99, 1);
+    persist(storage, PersistHardState{.term = 3, .voted_for = std::nullopt});
+    persist(storage,
+            PersistLog{.from_index = 1,
+                       .entries = {entry(1, 1, 0x11), entry(2, 1, 0x21),
+                                   entry(3, 1, 0x31)}});
+    persist(storage,
+            PersistLog{.from_index = 2,
+                       .entries = {entry(2, 2, 0x22), entry(3, 3, 0x33)}});
+    SnapshotStore::write_atomic(directory.path(), 99, 1, 0, snapshot);
+  }
+
+  auto recovered = RaftStorage::open(directory.path(), 99, 1);
+  EXPECT_EQ(recovered.state().snapshot, snapshot);
+  EXPECT_EQ(recovered.state().log,
+            (std::vector<LogEntry>{entry(3, 3, 0x33)}));
+}
+
+TEST(RaftStorageTest,
+     RecoveryAcceptsNewSnapshotWithOlderCompactedJournal) {
+  TestDirectory directory;
+  const StateMachineSnapshot older{
+      .last_included_index = 2,
+      .last_included_term = 1,
+      .state_machine = {std::byte{0xA2}},
+  };
+  const StateMachineSnapshot newer{
+      .last_included_index = 4,
+      .last_included_term = 3,
+      .state_machine = {std::byte{0xA4}},
+  };
+  {
+    auto storage = RaftStorage::open(directory.path(), 99, 1);
+    persist(storage, PersistHardState{.term = 3, .voted_for = std::nullopt});
+    persist(storage,
+            PersistLog{.from_index = 1,
+                       .entries = {entry(1, 1, 0x11), entry(2, 1, 0x22),
+                                   entry(3, 2, 0x33), entry(4, 3, 0x44),
+                                   entry(5, 3, 0x55)}});
+    storage.install_snapshot(older);
+    SnapshotStore::write_atomic(directory.path(), 99, 1, 0, newer);
+  }
+
+  auto recovered = RaftStorage::open(directory.path(), 99, 1);
+  EXPECT_EQ(recovered.state().snapshot, newer);
+  EXPECT_EQ(recovered.state().log,
+            (std::vector<LogEntry>{entry(5, 3, 0x55)}));
+}
+
+TEST(RaftStorageTest, RejectsSnapshotBoundaryWithoutRepresentableSuccessor) {
+  TestDirectory directory;
+  auto storage = RaftStorage::open(directory.path(), 99, 1);
+  persist(storage, PersistHardState{.term = 1, .voted_for = std::nullopt});
+  EXPECT_THROW(
+      storage.install_snapshot(StateMachineSnapshot{
+          .last_included_index = std::numeric_limits<LogIndex>::max(),
+          .last_included_term = 1,
+          .state_machine = {std::byte{0xFF}},
+      }),
+      RaftStorageError);
+}
+
+TEST(RaftStorageTest, CompactedJournalFailsClosedWhenRequiredSnapshotIsMissing) {
+  TestDirectory directory;
+  {
+    auto storage = RaftStorage::open(directory.path(), 99, 1);
+    persist(storage, PersistHardState{.term = 1, .voted_for = std::nullopt});
+    persist(storage,
+            PersistLog{.from_index = 1, .entries = {entry(1, 1, 0x11)}});
+    storage.install_snapshot(StateMachineSnapshot{
+        .last_included_index = 1,
+        .last_included_term = 1,
+        .state_machine = {std::byte{0xA1}},
+    });
+  }
+  std::filesystem::remove(SnapshotStore::published_path(directory.path()));
+  EXPECT_THROW(static_cast<void>(RaftStorage::open(directory.path(), 99, 1)),
+               RaftStorageError);
+}
+
+TEST(RaftStorageTest, CompactionSplitsLargeSuffixIntoRecoverableRecords) {
+  TestDirectory directory;
+  constexpr std::size_t total_entries = 4'102;
+  {
+    auto storage = RaftStorage::open(directory.path(), 99, 1);
+    persist(storage, PersistHardState{.term = 2, .voted_for = std::nullopt});
+    std::vector<LogEntry> first;
+    first.reserve(kMaxRaftLogEntriesPerRecord);
+    for (std::size_t offset = 0; offset < kMaxRaftLogEntriesPerRecord;
+         ++offset) {
+      first.push_back(entry(offset + 1, offset == 0 ? 1 : 2, 0x22));
+    }
+    persist(storage, PersistLog{.from_index = 1, .entries = std::move(first)});
+    std::vector<LogEntry> second;
+    for (std::size_t index = kMaxRaftLogEntriesPerRecord + 1;
+         index <= total_entries; ++index) {
+      second.push_back(entry(index, 2, 0x23));
+    }
+    persist(storage,
+            PersistLog{.from_index = kMaxRaftLogEntriesPerRecord + 1,
+                       .entries = std::move(second)});
+    storage.install_snapshot(StateMachineSnapshot{
+        .last_included_index = 1,
+        .last_included_term = 1,
+        .state_machine = {std::byte{0xB1}},
+    });
+  }
+  auto recovered = RaftStorage::open(directory.path(), 99, 1);
+  EXPECT_EQ(recovered.state().log.size(), total_entries - 1);
+  EXPECT_EQ(recovered.state().log.front().index, 2U);
+  EXPECT_EQ(recovered.state().log.back().index, total_entries);
+}
+
+TEST(RaftStorageTest, CompactedJournalCrashPointsRecoverTwice) {
+  for (const auto crash_point : {RaftStorageSyncPoint::after_write,
+                                 RaftStorageSyncPoint::after_file_sync,
+                                 RaftStorageSyncPoint::after_rename,
+                                 RaftStorageSyncPoint::after_directory_sync}) {
+    TestDirectory directory;
+    bool armed = false;
+    const StateMachineSnapshot snapshot{
+        .last_included_index = 2,
+        .last_included_term = 2,
+        .state_machine = {std::byte{0xC2}},
+    };
+    {
+      auto storage = RaftStorage::open(
+          directory.path(), 99, 1,
+          [&armed, crash_point](const RaftStorageSyncPoint current) {
+            if (armed && current == crash_point) {
+              throw std::runtime_error("simulated compacted-journal crash");
+            }
+          });
+      persist(storage,
+              PersistHardState{.term = 3, .voted_for = std::nullopt});
+      persist(storage,
+              PersistLog{.from_index = 1,
+                         .entries = {entry(1, 1, 0x11), entry(2, 2, 0x22),
+                                     entry(3, 3, 0x33)}});
+      SnapshotStore::write_atomic(directory.path(), 99, 1, 0, snapshot);
+      armed = true;
+      EXPECT_THROW(storage.install_snapshot(snapshot, true),
+                   std::runtime_error);
+    }
+    for (int restart = 0; restart < 2; ++restart) {
+      auto recovered = RaftStorage::open(directory.path(), 99, 1);
+      EXPECT_EQ(recovered.state().snapshot, snapshot);
+      EXPECT_EQ(recovered.state().log,
+                (std::vector<LogEntry>{entry(3, 3, 0x33)}));
+      recovered.close();
+    }
+  }
+}
+
 TEST(RaftStorageTest, TruncatesEveryIncompleteFinalJournalRecordPrefix) {
   TestDirectory directory;
   std::uintmax_t valid_size = 0;
@@ -341,7 +567,7 @@ TEST(RaftStorageTest, FailsClosedWhenAnyRecordLengthByteChanges) {
                            .entries = {entry(2, 1, 0x62)}});
       }
 
-      constexpr std::uint64_t log_header_size = 36;
+      constexpr std::uint64_t log_header_size = 52;
       const auto record_offset =
           interior ? log_header_size : second_record_offset;
       flip_byte(directory.path() / "raft-log.wal",

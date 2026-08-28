@@ -100,6 +100,7 @@ TEST(RaftElection, TerminalTermCannotWrapOnElection) {
                 RaftPersistentState{
                     .current_term = std::numeric_limits<Term>::max(),
                     .voted_for = std::nullopt,
+                    .snapshot = std::nullopt,
                     .log = {},
                 },
                 0);
@@ -111,6 +112,7 @@ TEST(RaftNodeRecovery, RestoresPersistentStateAtRestartLogicalTime) {
   const RaftPersistentState persistent{
       .current_term = 7,
       .voted_for = 2,
+      .snapshot = std::nullopt,
       .log = {entry(1, 4, 0x41), entry(2, 7, 0x72)},
   };
   RaftNode node(config(), persistent, 1'000);
@@ -127,10 +129,261 @@ TEST(RaftNodeRecovery, RestoresPersistentStateAtRestartLogicalTime) {
   EXPECT_LE(state.election_deadline, 1'300U);
 }
 
+TEST(RaftNodeRecovery, RestoresCompactedSnapshotBoundaryAndSuffix) {
+  const StateMachineSnapshot durable{
+      .last_included_index = 5,
+      .last_included_term = 2,
+      .state_machine = {std::byte{0xAA}},
+  };
+  const RaftPersistentState persistent{
+      .current_term = 3,
+      .voted_for = std::nullopt,
+      .snapshot = durable,
+      .log = {entry(6, 2, 0x61), entry(7, 3, 0x72)},
+  };
+  RaftNode node(config(), persistent, 100);
+
+  const auto state = node.snapshot();
+  EXPECT_EQ(state.durable_snapshot, durable);
+  EXPECT_EQ(state.log, persistent.log);
+  EXPECT_EQ(state.commit_index, 5U);
+  EXPECT_EQ(state.last_applied, 5U);
+
+  const auto election = trigger_election(node);
+  const auto sends = actions_of<SendMessage>(election);
+  ASSERT_FALSE(sends.empty());
+  const auto* vote = std::get_if<RequestVote>(&sends.front().message);
+  ASSERT_NE(vote, nullptr);
+  EXPECT_EQ(vote->last_log_index, 7U);
+  EXPECT_EQ(vote->last_log_term, 3U);
+}
+
+TEST(RaftNodeRecovery, RejectsSnapshotBoundaryWithoutRepresentableSuccessor) {
+  EXPECT_THROW(
+      RaftNode node(
+          config(),
+          RaftPersistentState{
+              .current_term = 3,
+              .voted_for = std::nullopt,
+              .snapshot = StateMachineSnapshot{
+                  .last_included_index =
+                      std::numeric_limits<LogIndex>::max(),
+                  .last_included_term = 2,
+                  .state_machine = {std::byte{0xFF}},
+              },
+              .log = {},
+          },
+          0),
+      std::invalid_argument);
+}
+
+TEST(RaftSnapshotCompaction, RetainsOnlySuffixAfterAppliedBoundary) {
+  RaftNode node(config());
+  static_cast<void>(node.step(
+      2, append(2, 2, 0, 0, {entry(1, 2, 0x11), entry(2, 2, 0x22)}, 2,
+                1)));
+  ASSERT_EQ(node.snapshot().last_applied, 2U);
+
+  const StateMachineSnapshot compacted{
+      .last_included_index = 2,
+      .last_included_term = 2,
+      .state_machine = {std::byte{0xCA}, std::byte{0xFE}},
+  };
+  const auto actions = node.compact(compacted);
+  ASSERT_EQ(actions_of<PersistSnapshot>(actions).size(), 1U);
+  EXPECT_EQ(actions_of<PersistSnapshot>(actions).front().snapshot, compacted);
+  EXPECT_EQ(node.snapshot().durable_snapshot, compacted);
+  EXPECT_TRUE(node.snapshot().log.empty());
+  EXPECT_EQ(node.snapshot().commit_index, 2U);
+  EXPECT_EQ(node.snapshot().last_applied, 2U);
+
+  EXPECT_THROW(node.compact(compacted), std::invalid_argument);
+  auto wrong_term = compacted;
+  wrong_term.last_included_index = 1;
+  wrong_term.last_included_term = 1;
+  EXPECT_THROW(node.compact(std::move(wrong_term)), std::invalid_argument);
+}
+
+TEST(RaftSnapshotInstallation, FollowerAssemblesChunksBeforePersistAndApply) {
+  RaftNode follower(config());
+  const std::vector<std::byte> image{std::byte{0x10}, std::byte{0x20},
+                                     std::byte{0x30}};
+  auto actions = follower.step(
+      2, InstallSnapshot{.term = 3,
+                         .leader_id = 2,
+                         .last_included_index = 5,
+                         .last_included_term = 2,
+                         .total_size = image.size(),
+                         .offset = 0,
+                         .data = {image.begin(), image.begin() + 2},
+                         .done = false,
+                         .rpc_id = 11});
+  EXPECT_TRUE(actions_of<PersistSnapshot>(actions).empty());
+  auto replies = actions_of<SendMessage>(actions);
+  ASSERT_EQ(replies.size(), 1U);
+  EXPECT_EQ(std::get<InstallSnapshotResponse>(replies[0].message).next_offset,
+            2U);
+
+  actions = follower.step(
+      2, InstallSnapshot{.term = 3,
+                         .leader_id = 2,
+                         .last_included_index = 5,
+                         .last_included_term = 2,
+                         .total_size = image.size(),
+                         .offset = 2,
+                         .data = {image.begin() + 2, image.end()},
+                         .done = true,
+                         .rpc_id = 12});
+  ASSERT_EQ(actions_of<PersistSnapshot>(actions).size(), 1U);
+  ASSERT_EQ(actions_of<ApplySnapshot>(actions).size(), 1U);
+  EXPECT_EQ(actions_of<ApplySnapshot>(actions)[0].snapshot.state_machine,
+            image);
+  EXPECT_EQ(follower.snapshot().commit_index, 5U);
+  EXPECT_EQ(follower.snapshot().last_applied, 5U);
+  EXPECT_EQ(follower.snapshot().durable_snapshot->state_machine, image);
+}
+
+TEST(RaftSnapshotInstallation,
+     RejectsSnapshotBoundaryWithoutRepresentableSuccessor) {
+  RaftNode follower(config());
+  const auto actions = follower.step(
+      2, InstallSnapshot{
+             .term = 3,
+             .leader_id = 2,
+             .last_included_index = std::numeric_limits<LogIndex>::max(),
+             .last_included_term = 2,
+             .total_size = 1,
+             .offset = 0,
+             .data = {std::byte{0xFF}},
+             .done = true,
+             .rpc_id = 11,
+         });
+  EXPECT_TRUE(actions_of<PersistSnapshot>(actions).empty());
+  EXPECT_TRUE(actions_of<ApplySnapshot>(actions).empty());
+  const auto replies = actions_of<SendMessage>(actions);
+  ASSERT_EQ(replies.size(), 1U);
+  EXPECT_FALSE(std::get<InstallSnapshotResponse>(replies[0].message).success);
+}
+
+TEST(RaftSnapshotInstallation, LeaderSendsSnapshotAfterFollowerRejectsBelowBase) {
+  const StateMachineSnapshot snapshot{
+      .last_included_index = 2,
+      .last_included_term = 2,
+      .state_machine = {std::byte{0xAB}},
+  };
+  RaftNode leader(config(),
+                  RaftPersistentState{.current_term = 2,
+                                      .voted_for = std::nullopt,
+                                      .snapshot = snapshot,
+                                      .log = {}},
+                  0);
+  const auto elected = elect(leader);
+  const auto sends = actions_of<SendMessage>(elected);
+  const auto to_two = std::ranges::find_if(
+      sends, [](const SendMessage& send) { return send.to == 2; });
+  ASSERT_NE(to_two, sends.end());
+  const auto rpc = std::get<AppendEntries>(to_two->message).rpc_id;
+
+  const auto retry = leader.step(
+      2, AppendEntriesResponse{.term = 3,
+                               .success = false,
+                               .match_index = 0,
+                               .reject_hint = 1,
+                               .rpc_id = rpc});
+  const auto retry_sends = actions_of<SendMessage>(retry);
+  ASSERT_EQ(retry_sends.size(), 1U);
+  const auto* install =
+      std::get_if<InstallSnapshot>(&retry_sends.front().message);
+  ASSERT_NE(install, nullptr);
+  EXPECT_EQ(install->last_included_index, 2U);
+  EXPECT_EQ(install->data, snapshot.state_machine);
+  EXPECT_TRUE(install->done);
+}
+
+TEST(RaftSnapshotInstallation, ResponsesCannotSkipChunksAndNewImageRestartsAtZero) {
+  constexpr std::size_t chunk_size = 1024U * 1024U;
+  const StateMachineSnapshot snapshot{
+      .last_included_index = 2,
+      .last_included_term = 2,
+      .state_machine = std::vector<std::byte>(chunk_size + 7U,
+                                               std::byte{0xAB}),
+  };
+  RaftNode leader(config(),
+                  RaftPersistentState{.current_term = 2,
+                                      .voted_for = std::nullopt,
+                                      .snapshot = snapshot,
+                                      .log = {}},
+                  0);
+  const auto elected = elect(leader);
+  const auto sends = actions_of<SendMessage>(elected);
+  const auto to_two = std::ranges::find_if(
+      sends, [](const SendMessage& send) { return send.to == 2; });
+  const auto to_three = std::ranges::find_if(
+      sends, [](const SendMessage& send) { return send.to == 3; });
+  ASSERT_NE(to_two, sends.end());
+  ASSERT_NE(to_three, sends.end());
+  const auto two_rpc = std::get<AppendEntries>(to_two->message).rpc_id;
+  const auto three_append = std::get<AppendEntries>(to_three->message);
+  auto actions = leader.step(
+      2, AppendEntriesResponse{.term = 3,
+                               .success = false,
+                               .match_index = 0,
+                               .reject_hint = 1,
+                               .rpc_id = two_rpc});
+  auto installs = actions_of<SendMessage>(actions);
+  ASSERT_EQ(installs.size(), 1U);
+  const auto first = std::get<InstallSnapshot>(installs[0].message);
+  ASSERT_EQ(first.offset, 0U);
+  ASSERT_EQ(first.data.size(), chunk_size);
+  ASSERT_FALSE(first.done);
+
+  actions = leader.step(
+      2, InstallSnapshotResponse{.term = 3,
+                                 .success = true,
+                                 .last_included_index = 2,
+                                 .next_offset = snapshot.state_machine.size(),
+                                 .rpc_id = first.rpc_id});
+  EXPECT_TRUE(actions.empty());
+  EXPECT_EQ(leader.progress(2)->snapshot_offset, 0U);
+
+  actions = leader.step(
+      2, InstallSnapshotResponse{.term = 3,
+                                 .success = true,
+                                 .last_included_index = 2,
+                                 .next_offset = chunk_size,
+                                 .rpc_id = first.rpc_id});
+  installs = actions_of<SendMessage>(actions);
+  ASSERT_EQ(installs.size(), 1U);
+  EXPECT_EQ(std::get<InstallSnapshot>(installs[0].message).offset, chunk_size);
+
+  static_cast<void>(leader.step(
+      3, AppendEntriesResponse{.term = 3,
+                               .success = true,
+                               .match_index = 3,
+                               .reject_hint = 0,
+                               .rpc_id = three_append.rpc_id}));
+
+  const StateMachineSnapshot newer{
+      .last_included_index = 3,
+      .last_included_term = 3,
+      .state_machine = {std::byte{0xCC}},
+  };
+  static_cast<void>(leader.compact(newer));
+  actions = leader.advance_time(leader.snapshot().heartbeat_deadline);
+  installs = actions_of<SendMessage>(actions);
+  const auto new_to_two = std::ranges::find_if(
+      installs, [](const SendMessage& send) { return send.to == 2; });
+  ASSERT_NE(new_to_two, installs.end());
+  const auto& restarted = std::get<InstallSnapshot>(new_to_two->message);
+  EXPECT_EQ(restarted.last_included_index, 3U);
+  EXPECT_EQ(restarted.offset, 0U);
+}
+
 TEST(RaftNodeRecovery, RejectsInvalidPersistentState) {
   auto persistent = RaftPersistentState{
       .current_term = 2,
       .voted_for = 99,
+      .snapshot = std::nullopt,
       .log = {},
   };
   EXPECT_THROW(RaftNode node(config(), persistent, 0), std::invalid_argument);
@@ -145,6 +398,7 @@ TEST(RaftNodeRecovery, RejectsInvalidPersistentState) {
   persistent = RaftPersistentState{
       .current_term = 0,
       .voted_for = 1,
+      .snapshot = std::nullopt,
       .log = {},
   };
   EXPECT_THROW(RaftNode node(config(), persistent, 0), std::invalid_argument);

@@ -258,6 +258,44 @@ TEST(PersistedRaftNodeTest, AppendResponseObservesDurableHardStateAndLog) {
   EXPECT_TRUE(checked_response);
 }
 
+TEST(PersistedRaftNodeTest, SnapshotAckObservesDurableInstalledState) {
+  DriverDirectory directory;
+  bool checked_response = false;
+  PersistedRaftNode* live_node = nullptr;
+  auto node = PersistedRaftNode::open(PersistedRaftOptions{
+      .config = driver_config(),
+      .data_directory = directory.path(),
+      .initial_time = 0,
+      .output = [&live_node, &checked_response](const Action& action) {
+        const auto* send = std::get_if<SendMessage>(&action);
+        if (send == nullptr ||
+            !std::holds_alternative<InstallSnapshotResponse>(send->message)) {
+          return;
+        }
+        ASSERT_NE(live_node, nullptr);
+        const auto durable = live_node->durable_state();
+        ASSERT_TRUE(durable.snapshot.has_value());
+        EXPECT_EQ(durable.snapshot->last_included_index, 5U);
+        EXPECT_EQ(durable.snapshot->state_machine,
+                  (std::vector<std::byte>{std::byte{0xA5}}));
+        checked_response = true;
+      },
+      .crash_hook = {},
+  });
+  live_node = &node;
+
+  node.step(2, InstallSnapshot{.term = 2,
+                               .leader_id = 2,
+                               .last_included_index = 5,
+                               .last_included_term = 2,
+                               .total_size = 1,
+                               .offset = 0,
+                               .data = {std::byte{0xA5}},
+                               .done = true,
+                               .rpc_id = 9});
+  EXPECT_TRUE(checked_response);
+}
+
 TEST(PersistedRaftNodeTest, ElectionAndProposalPersistBeforeReplication) {
   DriverDirectory directory;
   std::vector<Action> output;

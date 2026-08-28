@@ -14,6 +14,8 @@ add_executable(forgekv_unit_tests
   unit/raft_simulator_test.cpp
   unit/request_executor_test.cpp
   unit/serializer_test.cpp
+  unit/snapshot_store_test.cpp
+  unit/snapshot_codec_test.cpp
   unit/smoke_test.cpp
   unit/wal_test.cpp
   unit/wal_record_test.cpp

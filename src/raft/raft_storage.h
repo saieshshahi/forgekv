@@ -23,8 +23,10 @@ enum class RaftStorageErrorCode {
 };
 
 enum class RaftStorageSyncPoint {
+  after_write,
   after_file_sync,
   after_rename,
+  after_directory_sync,
 };
 
 using RaftStorageSyncHook = std::function<void(RaftStorageSyncPoint)>;
@@ -54,6 +56,8 @@ class RaftStorage final {
 
   void prepare(const PersistHardState& update);
   void prepare(const PersistLog& update);
+  void install_snapshot(const StateMachineSnapshot& snapshot,
+                        bool snapshot_already_durable = false);
   void sync();
   void close() noexcept;
 

@@ -61,6 +61,13 @@ struct PersistedRaftNode::Impl final {
           persist(*hard);
         } else if (const auto* log = std::get_if<PersistLog>(&action)) {
           persist(*log);
+        } else if (const auto* snapshot =
+                       std::get_if<PersistSnapshot>(&action)) {
+          at(RaftCrashPoint::before_persist);
+          storage.install_snapshot(snapshot->snapshot,
+                                   snapshot_already_durable);
+          snapshot_already_durable = false;
+          at(RaftCrashPoint::after_sync);
         } else {
           publish.push_back(std::move(action));
         }
@@ -87,6 +94,7 @@ struct PersistedRaftNode::Impl final {
   RaftOutputSink output;
   std::shared_ptr<RaftCrashHook> crash_hook;
   bool is_failed{};
+  bool snapshot_already_durable{};
 };
 
 PersistedRaftNode PersistedRaftNode::open(PersistedRaftOptions options) {
@@ -106,9 +114,20 @@ PersistedRaftNode PersistedRaftNode::open(PersistedRaftOptions options) {
                           if (!*hook) {
                             return;
                           }
-                          (*hook)(point == RaftStorageSyncPoint::after_file_sync
-                                      ? RaftCrashPoint::after_file_sync
-                                      : RaftCrashPoint::after_rename);
+                          switch (point) {
+                            case RaftStorageSyncPoint::after_write:
+                              (*hook)(RaftCrashPoint::after_write);
+                              break;
+                            case RaftStorageSyncPoint::after_file_sync:
+                              (*hook)(RaftCrashPoint::after_file_sync);
+                              break;
+                            case RaftStorageSyncPoint::after_rename:
+                              (*hook)(RaftCrashPoint::after_rename);
+                              break;
+                            case RaftStorageSyncPoint::after_directory_sync:
+                              (*hook)(RaftCrashPoint::after_sync);
+                              break;
+                          }
                         },
                         voter_fingerprint);
   return PersistedRaftNode(std::make_unique<Impl>(
@@ -141,6 +160,18 @@ void PersistedRaftNode::propose(std::vector<std::byte> command) {
 void PersistedRaftNode::read_barrier() {
   impl_->ensure_healthy();
   impl_->drive(impl_->node.read_barrier());
+}
+
+void PersistedRaftNode::compact(StateMachineSnapshot snapshot,
+                                const bool snapshot_already_durable) {
+  impl_->ensure_healthy();
+  impl_->snapshot_already_durable = snapshot_already_durable;
+  try {
+    impl_->drive(impl_->node.compact(std::move(snapshot)));
+  } catch (...) {
+    impl_->snapshot_already_durable = false;
+    throw;
+  }
 }
 
 RaftSnapshot PersistedRaftNode::snapshot() const {

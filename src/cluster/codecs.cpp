@@ -23,6 +23,8 @@ enum class PeerKind : std::uint8_t {
   request_vote_response = 2,
   append_entries = 3,
   append_entries_response = 4,
+  install_snapshot = 5,
+  install_snapshot_response = 6,
 };
 
 template <typename Value>
@@ -44,6 +46,10 @@ protocol::MessageType peer_type(const raft::Message& message) {
                       std::is_same_v<Type, raft::RequestVoteResponse>) {
           return protocol::MessageType::raft_request_vote;
         }
+        if constexpr (std::is_same_v<Type, raft::InstallSnapshot> ||
+                      std::is_same_v<Type, raft::InstallSnapshotResponse>) {
+          return protocol::MessageType::raft_install_snapshot;
+        }
         return protocol::MessageType::raft_append_entries;
       },
       message);
@@ -60,8 +66,13 @@ PeerKind peer_kind(const raft::Message& message) {
           return PeerKind::request_vote_response;
         } else if constexpr (std::is_same_v<Type, raft::AppendEntries>) {
           return PeerKind::append_entries;
-        } else {
+        } else if constexpr (std::is_same_v<Type,
+                                            raft::AppendEntriesResponse>) {
           return PeerKind::append_entries_response;
+        } else if constexpr (std::is_same_v<Type, raft::InstallSnapshot>) {
+          return PeerKind::install_snapshot;
+        } else {
+          return PeerKind::install_snapshot_response;
         }
       },
       message);
@@ -97,6 +108,22 @@ std::size_t peer_payload_size(const raft::Message& message) {
             size += kEntryHeaderSize + entry.command.size();
           }
           return size;
+        } else if constexpr (std::is_same_v<Type,
+                                            raft::AppendEntriesResponse>) {
+          return kPeerCommonSize + 40U;
+        } else if constexpr (std::is_same_v<Type, raft::InstallSnapshot>) {
+          if (typed.rpc_id == 0 || typed.term == 0 || typed.leader_id == 0 ||
+              typed.last_included_index == 0 ||
+              typed.last_included_term == 0 ||
+              typed.offset > typed.total_size ||
+              typed.data.size() > typed.total_size - typed.offset ||
+              typed.done !=
+                  (typed.offset + typed.data.size() == typed.total_size) ||
+              typed.data.size() > protocol::kMaxPayloadSize -
+                                      kPeerCommonSize - 64U) {
+            throw std::invalid_argument("invalid InstallSnapshot chunk");
+          }
+          return kPeerCommonSize + 64U + typed.data.size();
         } else {
           return kPeerCommonSize + 40U;
         }
@@ -163,11 +190,28 @@ protocol::Frame encode_peer_frame(const PeerEnvelope& envelope,
                 body.begin() + static_cast<std::ptrdiff_t>(offset + 24U));
             offset += kEntryHeaderSize + entry.command.size();
           }
-        } else {
+        } else if constexpr (std::is_same_v<Type,
+                                            raft::AppendEntriesResponse>) {
           wire::write_u64(body.subspan(0, 8), message.term);
           body[8] = message.success ? std::byte{1} : std::byte{0};
           wire::write_u64(body.subspan(16, 8), message.match_index);
           wire::write_u64(body.subspan(24, 8), message.reject_hint);
+          wire::write_u64(body.subspan(32, 8), message.rpc_id);
+        } else if constexpr (std::is_same_v<Type, raft::InstallSnapshot>) {
+          wire::write_u64(body.subspan(0, 8), message.term);
+          wire::write_u64(body.subspan(8, 8), message.leader_id);
+          wire::write_u64(body.subspan(16, 8), message.last_included_index);
+          wire::write_u64(body.subspan(24, 8), message.last_included_term);
+          wire::write_u64(body.subspan(32, 8), message.total_size);
+          wire::write_u64(body.subspan(40, 8), message.offset);
+          wire::write_u64(body.subspan(48, 8), message.rpc_id);
+          body[56] = message.done ? std::byte{1} : std::byte{0};
+          std::ranges::copy(message.data, body.begin() + 64);
+        } else {
+          wire::write_u64(body.subspan(0, 8), message.term);
+          body[8] = message.success ? std::byte{1} : std::byte{0};
+          wire::write_u64(body.subspan(16, 8), message.last_included_index);
+          wire::write_u64(body.subspan(24, 8), message.next_offset);
           wire::write_u64(body.subspan(32, 8), message.rpc_id);
         }
       },
@@ -292,6 +336,44 @@ DecodeResult<PeerEnvelope> decode_peer_frame(const protocol::Frame& frame) {
         .success = body[8] == std::byte{1},
         .match_index = wire::read_u64(body.subspan(16, 8)),
         .reject_hint = wire::read_u64(body.subspan(24, 8)),
+        .rpc_id = wire::read_u64(body.subspan(32, 8)),
+    };
+  } else if (kind == PeerKind::install_snapshot) {
+    if (frame.message_type != protocol::MessageType::raft_install_snapshot ||
+        body.size() < 64U || body[56] > std::byte{1} ||
+        !all_zero(body.subspan(57, 7))) {
+      return failure<PeerEnvelope>("invalid InstallSnapshot header");
+    }
+    const auto total_size = wire::read_u64(body.subspan(32, 8));
+    const auto offset = wire::read_u64(body.subspan(40, 8));
+    const auto chunk_size = body.size() - 64U;
+    const auto done = body[56] == std::byte{1};
+    if (offset > total_size || chunk_size > total_size - offset ||
+        done != (offset + chunk_size == total_size)) {
+      return failure<PeerEnvelope>("invalid InstallSnapshot chunk range");
+    }
+    envelope.message = raft::InstallSnapshot{
+        .term = wire::read_u64(body.subspan(0, 8)),
+        .leader_id = wire::read_u64(body.subspan(8, 8)),
+        .last_included_index = wire::read_u64(body.subspan(16, 8)),
+        .last_included_term = wire::read_u64(body.subspan(24, 8)),
+        .total_size = total_size,
+        .offset = offset,
+        .data = {body.begin() + 64, body.end()},
+        .done = done,
+        .rpc_id = wire::read_u64(body.subspan(48, 8)),
+    };
+  } else if (kind == PeerKind::install_snapshot_response) {
+    if (frame.message_type != protocol::MessageType::raft_install_snapshot ||
+        body.size() != 40U || body[8] > std::byte{1} ||
+        !all_zero(body.subspan(9, 7))) {
+      return failure<PeerEnvelope>("invalid InstallSnapshotResponse payload");
+    }
+    envelope.message = raft::InstallSnapshotResponse{
+        .term = wire::read_u64(body.subspan(0, 8)),
+        .success = body[8] == std::byte{1},
+        .last_included_index = wire::read_u64(body.subspan(16, 8)),
+        .next_offset = wire::read_u64(body.subspan(24, 8)),
         .rpc_id = wire::read_u64(body.subspan(32, 8)),
     };
   } else {

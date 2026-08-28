@@ -13,6 +13,7 @@ namespace forgekv::raft {
 namespace {
 
 constexpr std::size_t kMaximumTrackedRpcsPerPeer = 64U;
+constexpr std::size_t kSnapshotChunkSize = 1024U * 1024U;
 
 void validate_config_impl(const RaftConfig& config) {
   if (config.voters.size() < 3 || config.voters.size() > 7 ||
@@ -59,8 +60,19 @@ void validate_persistent_state(const RaftConfig& config,
           config.voters.end()) {
     throw std::invalid_argument("persistent Raft vote refers to a non-voter");
   }
-  Term previous_term = 0;
-  LogIndex expected_index = 1;
+  const auto base_index = persistent.snapshot.has_value()
+                              ? persistent.snapshot->last_included_index
+                              : LogIndex{0};
+  Term previous_term = persistent.snapshot.has_value()
+                           ? persistent.snapshot->last_included_term
+                           : Term{0};
+  if (persistent.snapshot.has_value() &&
+      (base_index == 0 || previous_term == 0 ||
+       base_index == std::numeric_limits<LogIndex>::max() ||
+       previous_term > persistent.current_term)) {
+    throw std::invalid_argument("persistent Raft snapshot is invalid");
+  }
+  LogIndex expected_index = base_index + 1;
   for (const auto& entry : persistent.log) {
     if (entry.index != expected_index || entry.term == 0 ||
         entry.term < previous_term || entry.term > persistent.current_term) {
@@ -83,19 +95,28 @@ struct RaftNode::Impl final {
       : config(std::move(value)),
         current_term(persistent.current_term),
         voted_for(persistent.voted_for),
+        durable_snapshot(std::move(persistent.snapshot)),
         now(initial_time),
         random(config.random_seed ^
                (config.self_id * 0x9E3779B97F4A7C15ULL)) {
     validate_raft_config(config);
     validate_persistent_state(config, persistent);
+    const auto base_index = durable_snapshot.has_value()
+                                ? durable_snapshot->last_included_index
+                                : LogIndex{0};
+    const auto base_term = durable_snapshot.has_value()
+                               ? durable_snapshot->last_included_term
+                               : Term{0};
     log.push_back(LogEntry{
-        .index = 0,
-        .term = 0,
+        .index = base_index,
+        .term = base_term,
         .kind = EntryKind::no_op,
         .command = {},
     });
     log.insert(log.end(), std::make_move_iterator(persistent.log.begin()),
                std::make_move_iterator(persistent.log.end()));
+    commit_index = base_index;
+    last_applied = base_index;
     reset_election_deadline();
     verify_invariants();
   }
@@ -116,23 +137,40 @@ struct RaftNode::Impl final {
     return log.back().term;
   }
 
+  [[nodiscard]] LogIndex base_index() const { return log.front().index; }
+
+  [[nodiscard]] const LogEntry& entry_at(const LogIndex index) const {
+    if (index < base_index() || index > last_log_index()) {
+      throw std::out_of_range("Raft log index is outside retained range");
+    }
+    return log.at(static_cast<std::size_t>(index - base_index()));
+  }
+
   void verify_invariants() const {
     const auto invalid = [](const char* message) {
       throw std::logic_error(message);
     };
-    if (log.empty() || log.front().index != 0 || log.front().term != 0) {
+    if (log.empty() || log.front().kind != EntryKind::no_op ||
+        !log.front().command.empty() ||
+        ((log.front().index == 0) != (log.front().term == 0))) {
       invalid("Raft log sentinel is invalid");
+    }
+    if (durable_snapshot.has_value() &&
+        (durable_snapshot->last_included_index != log.front().index ||
+         durable_snapshot->last_included_term != log.front().term)) {
+      invalid("Raft snapshot boundary disagrees with log sentinel");
     }
     for (std::size_t position = 1; position < log.size(); ++position) {
       const auto& previous = log[position - 1];
       const auto& current = log[position];
-      if (current.index != static_cast<LogIndex>(position) ||
+      if (current.index != log.front().index + static_cast<LogIndex>(position) ||
           current.term < previous.term ||
           current.term > current_term) {
         invalid("Raft log is not gap-free with nondecreasing terms");
       }
     }
-    if (commit_index > last_log_index() || last_applied > commit_index) {
+    if (commit_index < base_index() || commit_index > last_log_index() ||
+        last_applied < base_index() || last_applied > commit_index) {
       invalid("Raft commit/apply indexes are out of bounds");
     }
     if (voted_for.has_value() && !is_voter(*voted_for)) {
@@ -162,6 +200,26 @@ struct RaftNode::Impl final {
           progress.newest_rpc_last_index > last_log_index() ||
           progress.recent_rpcs.size() > kMaximumTrackedRpcsPerPeer) {
         invalid("Raft leader peer progress is out of bounds");
+      }
+      if (progress.snapshot_index != 0 &&
+          (!durable_snapshot.has_value() ||
+           progress.snapshot_index !=
+               durable_snapshot->last_included_index ||
+           progress.snapshot_offset >
+               durable_snapshot->state_machine.size())) {
+        invalid("Raft snapshot replication progress is out of bounds");
+      }
+      if (progress.recent_snapshot_rpcs.size() >
+          kMaximumTrackedRpcsPerPeer) {
+        invalid("too many tracked snapshot RPCs");
+      }
+      for (const auto& rpc : progress.recent_snapshot_rpcs) {
+        if (rpc.rpc_id == 0 || rpc.rpc_id > progress.newest_rpc_id ||
+            rpc.snapshot_index != progress.snapshot_index ||
+            rpc.offset > rpc.end || !durable_snapshot.has_value() ||
+            rpc.end > durable_snapshot->state_machine.size()) {
+          invalid("Raft snapshot RPC history is out of bounds");
+        }
       }
       for (const auto& rpc : progress.recent_rpcs) {
         if (rpc.rpc_id == 0 || rpc.rpc_id > progress.newest_rpc_id ||
@@ -210,14 +268,57 @@ struct RaftNode::Impl final {
   void send_append_entries(const NodeId peer) {
     auto& progress = peer_progress.at(peer);
     const auto maximum_next = last_log_index() + 1;
-    progress.next_index = std::clamp(progress.next_index, LogIndex{1},
-                                     maximum_next);
+    progress.next_index = std::min(progress.next_index, maximum_next);
+    if (progress.next_index <= base_index() && durable_snapshot.has_value()) {
+      const auto& snapshot = *durable_snapshot;
+      if (progress.snapshot_index != snapshot.last_included_index) {
+        progress.snapshot_index = snapshot.last_included_index;
+        progress.snapshot_offset = 0;
+        progress.recent_snapshot_rpcs.clear();
+      }
+      progress.snapshot_offset = std::min<std::uint64_t>(
+          progress.snapshot_offset, snapshot.state_machine.size());
+      const auto remaining = snapshot.state_machine.size() -
+                             static_cast<std::size_t>(progress.snapshot_offset);
+      const auto chunk_size = std::min(remaining, kSnapshotChunkSize);
+      const auto rpc_id = next_rpc_id++;
+      progress.newest_rpc_id = rpc_id;
+      progress.recent_snapshot_rpcs.push_back(PeerProgress::SnapshotRpcRange{
+          .rpc_id = rpc_id,
+          .snapshot_index = snapshot.last_included_index,
+          .offset = progress.snapshot_offset,
+          .end = progress.snapshot_offset + chunk_size,
+      });
+      if (progress.recent_snapshot_rpcs.size() >
+          kMaximumTrackedRpcsPerPeer) {
+        progress.recent_snapshot_rpcs.erase(
+            progress.recent_snapshot_rpcs.begin());
+      }
+      const auto begin = snapshot.state_machine.begin() +
+                         static_cast<std::ptrdiff_t>(progress.snapshot_offset);
+      actions.push_back(SendMessage{
+          .to = peer,
+          .message = InstallSnapshot{
+              .term = current_term,
+              .leader_id = config.self_id,
+              .last_included_index = snapshot.last_included_index,
+              .last_included_term = snapshot.last_included_term,
+              .total_size = snapshot.state_machine.size(),
+              .offset = progress.snapshot_offset,
+              .data = {begin,
+                       begin + static_cast<std::ptrdiff_t>(chunk_size)},
+              .done = chunk_size == remaining,
+              .rpc_id = rpc_id,
+          },
+      });
+      return;
+    }
+    progress.next_index = std::max(progress.next_index, base_index() + 1);
     const auto previous_index = progress.next_index - 1;
-    const auto previous_term =
-        log.at(static_cast<std::size_t>(previous_index)).term;
+    const auto previous_term = entry_at(previous_index).term;
     std::vector<LogEntry> entries;
     std::size_t encoded_bytes = 0;
-    for (auto position = static_cast<std::size_t>(progress.next_index);
+    for (auto position = static_cast<std::size_t>(progress.next_index - base_index());
          position < log.size() &&
          entries.size() < config.max_append_entries;
          ++position) {
@@ -292,6 +393,9 @@ struct RaftNode::Impl final {
                                           .newest_rpc_id = 0,
                                           .newest_rpc_last_index = 0,
                                           .recent_rpcs = {},
+                                          .snapshot_index = 0,
+                                          .snapshot_offset = 0,
+                                          .recent_snapshot_rpcs = {},
                                       });
       }
     }
@@ -413,7 +517,7 @@ struct RaftNode::Impl final {
     while (last_applied < commit_index) {
       ++last_applied;
       actions.push_back(ApplyEntry{
-          .entry = log.at(static_cast<std::size_t>(last_applied)),
+          .entry = entry_at(last_applied),
       });
     }
   }
@@ -421,7 +525,7 @@ struct RaftNode::Impl final {
   bool advance_leader_commit() {
     for (auto candidate = last_log_index(); candidate > commit_index;
          --candidate) {
-      if (log.at(static_cast<std::size_t>(candidate)).term != current_term) {
+      if (entry_at(candidate).term != current_term) {
         continue;
       }
       std::size_t replicated = 1;
@@ -444,7 +548,7 @@ struct RaftNode::Impl final {
       while (last_applied < commit_index) {
         ++last_applied;
         actions.push_back(ApplyEntry{
-            .entry = log.at(static_cast<std::size_t>(last_applied)),
+            .entry = entry_at(last_applied),
         });
       }
       return true;
@@ -466,16 +570,19 @@ struct RaftNode::Impl final {
       reset_election_deadline();
     }
 
+    if (request.previous_log_index < base_index()) {
+      send_append_response(from, request, false, 0, base_index() + 1);
+      return;
+    }
     if (request.previous_log_index > last_log_index()) {
       send_append_response(from, request, false, 0, last_log_index() + 1);
       return;
     }
-    const auto local_previous_term =
-        log.at(static_cast<std::size_t>(request.previous_log_index)).term;
+    const auto local_previous_term = entry_at(request.previous_log_index).term;
     if (local_previous_term != request.previous_log_term) {
       auto first_conflict = request.previous_log_index;
-      while (first_conflict > 1 &&
-             log.at(static_cast<std::size_t>(first_conflict - 1)).term ==
+      while (first_conflict > base_index() + 1 &&
+             entry_at(first_conflict - 1).term ==
                  local_previous_term) {
         --first_conflict;
       }
@@ -502,8 +609,7 @@ struct RaftNode::Impl final {
         replacement_offset = offset;
         break;
       }
-      const auto& existing =
-          log.at(static_cast<std::size_t>(incoming.index));
+      const auto& existing = entry_at(incoming.index);
       if (existing.term != incoming.term) {
         if (incoming.index <= commit_index) {
           send_append_response(from, request, false, 0, commit_index + 1);
@@ -521,7 +627,7 @@ struct RaftNode::Impl final {
     if (replacement_offset.has_value()) {
       const auto offset = *replacement_offset;
       const auto from_index = request.entries[offset].index;
-      log.resize(static_cast<std::size_t>(from_index));
+      log.resize(static_cast<std::size_t>(from_index - base_index()));
       log.insert(log.end(), request.entries.begin() +
                                 static_cast<std::ptrdiff_t>(offset),
                  request.entries.end());
@@ -585,6 +691,169 @@ struct RaftNode::Impl final {
     send_append_entries(from);
   }
 
+  void send_snapshot_response(const NodeId to, const InstallSnapshot& request,
+                              const bool success,
+                              const std::uint64_t next_offset) {
+    actions.push_back(SendMessage{
+        .to = to,
+        .message = InstallSnapshotResponse{
+            .term = current_term,
+            .success = success,
+            .last_included_index = request.last_included_index,
+            .next_offset = next_offset,
+            .rpc_id = request.rpc_id,
+        },
+    });
+  }
+
+  void handle(const NodeId from, const InstallSnapshot& request) {
+    if (request.term == 0 || request.term < current_term ||
+        request.leader_id != from || request.rpc_id == 0 ||
+        request.last_included_index == 0 ||
+        request.last_included_index ==
+            std::numeric_limits<LogIndex>::max() ||
+        request.last_included_term == 0 ||
+        request.last_included_term > request.term ||
+        request.total_size > 512ULL * 1024ULL * 1024ULL ||
+        request.offset > request.total_size ||
+        request.data.size() > request.total_size - request.offset ||
+        request.done !=
+            (request.offset + request.data.size() == request.total_size)) {
+      send_snapshot_response(from, request, false, 0);
+      return;
+    }
+    if (role != Role::follower) {
+      become_follower(current_term, from);
+    } else {
+      leader_id = from;
+      reset_election_deadline();
+    }
+    if (request.last_included_index <= last_applied) {
+      send_snapshot_response(from, request, true, request.total_size);
+      return;
+    }
+    if (request.offset == 0) {
+      incoming_snapshot = IncomingSnapshot{
+          .leader_id = from,
+          .last_included_index = request.last_included_index,
+          .last_included_term = request.last_included_term,
+          .total_size = request.total_size,
+          .bytes = {},
+      };
+      incoming_snapshot->bytes.reserve(
+          static_cast<std::size_t>(request.total_size));
+    }
+    if (!incoming_snapshot.has_value() ||
+        incoming_snapshot->leader_id != from ||
+        incoming_snapshot->last_included_index !=
+            request.last_included_index ||
+        incoming_snapshot->last_included_term != request.last_included_term ||
+        incoming_snapshot->total_size != request.total_size ||
+        incoming_snapshot->bytes.size() != request.offset) {
+      const auto expected = incoming_snapshot.has_value()
+                                ? incoming_snapshot->bytes.size()
+                                : std::uint64_t{0};
+      send_snapshot_response(from, request, false, expected);
+      return;
+    }
+    incoming_snapshot->bytes.insert(incoming_snapshot->bytes.end(),
+                                    request.data.begin(), request.data.end());
+    if (!request.done) {
+      send_snapshot_response(from, request, true,
+                             incoming_snapshot->bytes.size());
+      return;
+    }
+
+    StateMachineSnapshot installed{
+        .last_included_index = request.last_included_index,
+        .last_included_term = request.last_included_term,
+        .state_machine = std::move(incoming_snapshot->bytes),
+    };
+    incoming_snapshot.reset();
+    std::vector<LogEntry> suffix;
+    if (installed.last_included_index <= last_log_index() &&
+        installed.last_included_index >= base_index() &&
+        entry_at(installed.last_included_index).term ==
+            installed.last_included_term) {
+      const auto position = static_cast<std::size_t>(
+          installed.last_included_index - base_index() + 1);
+      suffix.assign(log.begin() + static_cast<std::ptrdiff_t>(position),
+                    log.end());
+    }
+    log.clear();
+    log.push_back(LogEntry{.index = installed.last_included_index,
+                           .term = installed.last_included_term,
+                           .kind = EntryKind::no_op,
+                           .command = {}});
+    log.insert(log.end(), std::make_move_iterator(suffix.begin()),
+               std::make_move_iterator(suffix.end()));
+    durable_snapshot = installed;
+    commit_index = std::max(commit_index, installed.last_included_index);
+    commit_index = std::min(commit_index, last_log_index());
+    last_applied = installed.last_included_index;
+    actions.push_back(PersistSnapshot{.snapshot = installed});
+    actions.push_back(ApplySnapshot{.snapshot = installed});
+    send_snapshot_response(from, request, true, request.total_size);
+  }
+
+  void handle(const NodeId from, const InstallSnapshotResponse& response) {
+    if (role != Role::leader || response.term != current_term) {
+      return;
+    }
+    const auto found = peer_progress.find(from);
+    if (found == peer_progress.end() || !durable_snapshot.has_value() ||
+        response.last_included_index !=
+            durable_snapshot->last_included_index ||
+        found->second.snapshot_index !=
+            durable_snapshot->last_included_index) {
+      return;
+    }
+    auto& progress = found->second;
+    const auto rpc = std::ranges::find_if(
+        progress.recent_snapshot_rpcs,
+        [&response](const PeerProgress::SnapshotRpcRange& sent) {
+          return sent.rpc_id == response.rpc_id &&
+                 sent.snapshot_index == response.last_included_index;
+        });
+    if (rpc == progress.recent_snapshot_rpcs.end()) {
+      return;
+    }
+    const auto sent = *rpc;
+    if (!response.success) {
+      if (response.rpc_id != progress.newest_rpc_id ||
+          response.next_offset > sent.end) {
+        return;
+      }
+      progress.recent_snapshot_rpcs.erase(rpc);
+      progress.snapshot_offset = response.next_offset;
+      send_append_entries(from);
+      return;
+    }
+    if (response.next_offset != sent.end) {
+      return;
+    }
+    if (sent.end <= progress.snapshot_offset) {
+      return;
+    }
+    if (sent.offset != progress.snapshot_offset) {
+      return;
+    }
+    progress.recent_snapshot_rpcs.erase(rpc);
+    progress.snapshot_offset = sent.end;
+    if (progress.snapshot_offset < durable_snapshot->state_machine.size()) {
+      send_append_entries(from);
+      return;
+    }
+    progress.match_index =
+        std::max(progress.match_index, durable_snapshot->last_included_index);
+    progress.next_index = progress.match_index + 1;
+    progress.snapshot_offset = 0;
+    progress.snapshot_index = 0;
+    progress.recent_snapshot_rpcs.clear();
+    progress.recent_rpcs.clear();
+    send_append_entries(from);
+  }
+
   [[nodiscard]] Term message_term(const Message& message) const {
     return std::visit([](const auto& value) { return value.term; }, message);
   }
@@ -599,6 +868,9 @@ struct RaftNode::Impl final {
       if (const auto* append = std::get_if<AppendEntries>(&message);
           append != nullptr && append->leader_id == from) {
         incoming_leader = from;
+      } else if (const auto* snapshot = std::get_if<InstallSnapshot>(&message);
+                 snapshot != nullptr && snapshot->leader_id == from) {
+        incoming_leader = from;
       }
       become_follower(incoming_term, incoming_leader);
     }
@@ -611,6 +883,7 @@ struct RaftNode::Impl final {
   Term current_term{};
   std::optional<NodeId> voted_for;
   std::optional<NodeId> leader_id;
+  std::optional<StateMachineSnapshot> durable_snapshot;
   std::vector<LogEntry> log;
   LogIndex commit_index{};
   LogIndex last_applied{};
@@ -620,6 +893,14 @@ struct RaftNode::Impl final {
   std::mt19937_64 random;
   std::unordered_set<NodeId> votes_received;
   std::unordered_map<NodeId, PeerProgress> peer_progress;
+  struct IncomingSnapshot final {
+    NodeId leader_id{};
+    LogIndex last_included_index{};
+    Term last_included_term{};
+    std::uint64_t total_size{};
+    std::vector<std::byte> bytes;
+  };
+  std::optional<IncomingSnapshot> incoming_snapshot;
   RpcId next_rpc_id{1};
   Actions actions;
 };
@@ -685,6 +966,40 @@ Actions RaftNode::read_barrier() {
   return std::move(impl_->actions);
 }
 
+Actions RaftNode::compact(StateMachineSnapshot snapshot) {
+  impl_->actions.clear();
+  if (snapshot.last_included_index ==
+          std::numeric_limits<LogIndex>::max() ||
+      snapshot.last_included_index <= impl_->base_index() ||
+      snapshot.last_included_index > impl_->last_applied ||
+      impl_->entry_at(snapshot.last_included_index).term !=
+          snapshot.last_included_term) {
+    throw std::invalid_argument("snapshot does not match an applied log prefix");
+  }
+  const auto suffix_position = static_cast<std::size_t>(
+      snapshot.last_included_index - impl_->base_index() + 1);
+  std::vector<LogEntry> suffix{
+      impl_->log.begin() + static_cast<std::ptrdiff_t>(suffix_position),
+      impl_->log.end()};
+  impl_->log.clear();
+  impl_->log.push_back(LogEntry{.index = snapshot.last_included_index,
+                                .term = snapshot.last_included_term,
+                                .kind = EntryKind::no_op,
+                                .command = {}});
+  impl_->log.insert(impl_->log.end(), std::make_move_iterator(suffix.begin()),
+                    std::make_move_iterator(suffix.end()));
+  impl_->durable_snapshot = snapshot;
+  for (auto& [peer, progress] : impl_->peer_progress) {
+    static_cast<void>(peer);
+    progress.snapshot_index = snapshot.last_included_index;
+    progress.snapshot_offset = 0;
+    progress.recent_snapshot_rpcs.clear();
+  }
+  impl_->actions.push_back(PersistSnapshot{.snapshot = std::move(snapshot)});
+  impl_->verify_invariants();
+  return std::move(impl_->actions);
+}
+
 RaftSnapshot RaftNode::snapshot() const {
   return RaftSnapshot{
       .self_id = impl_->config.self_id,
@@ -692,6 +1007,7 @@ RaftSnapshot RaftNode::snapshot() const {
       .current_term = impl_->current_term,
       .voted_for = impl_->voted_for,
       .leader_id = impl_->leader_id,
+      .durable_snapshot = impl_->durable_snapshot,
       .log = {impl_->log.begin() + 1, impl_->log.end()},
       .commit_index = impl_->commit_index,
       .last_applied = impl_->last_applied,

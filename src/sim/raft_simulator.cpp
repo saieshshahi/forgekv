@@ -69,13 +69,25 @@ std::string message_name(const raft::Message& message) {
           }
           output << "])";
           return output.str();
-        } else {
+        } else if constexpr (std::is_same_v<Value,
+                                            raft::AppendEntriesResponse>) {
           return "AppendEntriesResponse(term=" +
                  std::to_string(value.term) + ",rpc=" +
                  std::to_string(value.rpc_id) + ",success=" +
                  (value.success ? "1" : "0") + ",match=" +
                  std::to_string(value.match_index) + ",reject_hint=" +
                  std::to_string(value.reject_hint) + ")";
+        } else if constexpr (std::is_same_v<Value,
+                                            raft::InstallSnapshot>) {
+          return "InstallSnapshot(term=" + std::to_string(value.term) +
+                 ",index=" + std::to_string(value.last_included_index) +
+                 ",offset=" + std::to_string(value.offset) +
+                 ",bytes=" + std::to_string(value.data.size()) + ")";
+        } else {
+          return "InstallSnapshotResponse(term=" +
+                 std::to_string(value.term) + ",index=" +
+                 std::to_string(value.last_included_index) + ",next=" +
+                 std::to_string(value.next_offset) + ")";
         }
       },
       message);

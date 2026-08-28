@@ -47,6 +47,8 @@ class PersistedRaftNode final {
   void step(NodeId from, const Message& message);
   void propose(std::vector<std::byte> command);
   void read_barrier();
+  void compact(StateMachineSnapshot snapshot,
+               bool snapshot_already_durable = false);
 
   [[nodiscard]] RaftSnapshot snapshot() const;
   [[nodiscard]] RaftPersistentState durable_state() const;
