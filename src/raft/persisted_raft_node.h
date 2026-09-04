@@ -4,6 +4,7 @@
 #include "raft/raft_storage.h"
 
 #include <filesystem>
+#include <chrono>
 #include <functional>
 #include <memory>
 
@@ -21,6 +22,8 @@ enum class RaftCrashPoint {
 
 using RaftOutputSink = std::function<void(const Action&)>;
 using RaftCrashHook = std::function<void(RaftCrashPoint)>;
+using RaftSyncObserver =
+    std::function<void(std::chrono::microseconds duration)>;
 
 struct PersistedRaftOptions final {
   RaftConfig config;
@@ -28,6 +31,7 @@ struct PersistedRaftOptions final {
   LogicalTime initial_time{};
   RaftOutputSink output;
   RaftCrashHook crash_hook;
+  RaftSyncObserver sync_observer{};
 };
 
 [[nodiscard]] std::uint64_t fixed_membership_fingerprint(
@@ -51,6 +55,9 @@ class PersistedRaftNode final {
                bool snapshot_already_durable = false);
 
   [[nodiscard]] RaftSnapshot snapshot() const;
+  [[nodiscard]] RaftStatus status() const noexcept;
+  [[nodiscard]] std::optional<PeerProgress> progress(NodeId peer) const;
+  [[nodiscard]] std::optional<LogIndex> match_index(NodeId peer) const noexcept;
   [[nodiscard]] RaftPersistentState durable_state() const;
   [[nodiscard]] bool failed() const noexcept;
 

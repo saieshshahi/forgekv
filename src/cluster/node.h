@@ -31,8 +31,10 @@ struct ClusterNodeConfig final {
   raft::NodeId node_id{};
   std::filesystem::path data_directory;
   std::string bind_address{"127.0.0.1"};
+  std::string admin_bind_address{"127.0.0.1"};
   std::uint16_t client_port{};
   std::uint16_t peer_port{};
+  std::uint16_t admin_port{};
   std::vector<PeerAddress> peers;
   raft::LogicalTime election_timeout_min{600};
   raft::LogicalTime election_timeout_max{1'000};
@@ -61,7 +63,10 @@ class ClusterNode final {
 
   [[nodiscard]] std::uint16_t client_port() const noexcept;
   [[nodiscard]] std::uint16_t peer_port() const noexcept;
+  [[nodiscard]] std::uint16_t admin_port() const noexcept;
   [[nodiscard]] bool failed() const noexcept;
+  [[nodiscard]] bool healthy() const noexcept;
+  [[nodiscard]] bool ready() const noexcept;
 
  private:
   class Impl;

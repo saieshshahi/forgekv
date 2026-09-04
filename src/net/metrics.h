@@ -16,6 +16,8 @@ struct MetricsSnapshot {
   std::uint64_t read_buffer_bytes{0U};
   std::uint64_t write_buffer_bytes{0U};
   std::uint64_t connections_backpressured{0U};
+  std::uint64_t backpressure_events_total{0U};
+  std::uint64_t rejected_requests_total{0U};
 };
 
 class Metrics final {
@@ -32,6 +34,7 @@ class Metrics final {
   void remove_write_buffer_bytes(std::size_t count) noexcept;
   void backpressure_started() noexcept;
   void backpressure_ended() noexcept;
+  void request_rejected() noexcept;
 
   [[nodiscard]] MetricsSnapshot snapshot() const noexcept;
 
@@ -45,6 +48,8 @@ class Metrics final {
   std::atomic<std::uint64_t> read_buffer_bytes_{0U};
   std::atomic<std::uint64_t> write_buffer_bytes_{0U};
   std::atomic<std::uint64_t> connections_backpressured_{0U};
+  std::atomic<std::uint64_t> backpressure_events_total_{0U};
+  std::atomic<std::uint64_t> rejected_requests_total_{0U};
 };
 
 }  // namespace forgekv::net

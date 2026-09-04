@@ -13,7 +13,14 @@ void Metrics::connection_opened() noexcept {
 }
 
 void Metrics::connection_closed() noexcept {
-  active_connections_.fetch_sub(1U, kOrder);
+  auto active = active_connections_.load(kOrder);
+  while (active != 0U &&
+         !active_connections_.compare_exchange_weak(active, active - 1U,
+                                                    kOrder, kOrder)) {
+  }
+  if (active == 0U) {
+    return;
+  }
   closed_connections_total_.fetch_add(1U, kOrder);
 }
 
@@ -51,10 +58,15 @@ void Metrics::remove_write_buffer_bytes(const std::size_t count) noexcept {
 
 void Metrics::backpressure_started() noexcept {
   connections_backpressured_.fetch_add(1U, kOrder);
+  backpressure_events_total_.fetch_add(1U, kOrder);
 }
 
 void Metrics::backpressure_ended() noexcept {
   connections_backpressured_.fetch_sub(1U, kOrder);
+}
+
+void Metrics::request_rejected() noexcept {
+  rejected_requests_total_.fetch_add(1U, kOrder);
 }
 
 MetricsSnapshot Metrics::snapshot() const noexcept {
@@ -68,6 +80,8 @@ MetricsSnapshot Metrics::snapshot() const noexcept {
       .read_buffer_bytes = read_buffer_bytes_.load(kOrder),
       .write_buffer_bytes = write_buffer_bytes_.load(kOrder),
       .connections_backpressured = connections_backpressured_.load(kOrder),
+      .backpressure_events_total = backpressure_events_total_.load(kOrder),
+      .rejected_requests_total = rejected_requests_total_.load(kOrder),
   };
 }
 

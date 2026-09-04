@@ -17,6 +17,7 @@ find_package(Threads REQUIRED)
 add_library(forgekv_net STATIC
   net/metrics.cpp
   net/socket_ops.cpp
+  server/admin_server.cpp
   server/request_executor.cpp
   server/tcp_server.cpp
 )
@@ -49,6 +50,7 @@ target_include_directories(forgekv_sim PUBLIC "${PROJECT_SOURCE_DIR}/src")
 add_library(forgekv_cluster STATIC
   cluster/codecs.cpp
   cluster/node.cpp
+  cluster/observability.cpp
   cluster/snapshot_codec.cpp
   cluster/state_machine.cpp
 )

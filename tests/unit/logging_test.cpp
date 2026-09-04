@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +58,30 @@ TEST_F(LoggerTest, OffDisablesEveryMessage) {
 
   EXPECT_FALSE(Logger::enabled(Severity::critical));
   EXPECT_FALSE(Logger::enabled(Severity::off));
+}
+
+TEST_F(LoggerTest, FormatsStructuredJsonWithUtcTimeAndCorrelationId) {
+  const auto timestamp = std::chrono::system_clock::time_point{};
+  const LogRecord record{.severity = Severity::warning,
+                         .message = "bad \"frame\"\n",
+                         .request_id = 42U};
+
+  EXPECT_EQ(format_log_record(record, timestamp),
+            "{\"timestamp\":\"1970-01-01T00:00:00.000000Z\","
+            "\"severity\":\"WARN\",\"message\":\"bad \\\"frame\\\"\\n\","
+            "\"request_id\":42}");
+}
+
+TEST_F(LoggerTest, StructuredSinkReceivesOptionalCorrelationId) {
+  std::optional<LogRecord> received;
+  Logger::set_sink([&received](const LogRecord& record) { received = record; });
+
+  Logger::write(Severity::error, "request failed", 99U);
+
+  ASSERT_TRUE(received.has_value());
+  EXPECT_EQ(received->severity, Severity::error);
+  EXPECT_EQ(received->message, "request failed");
+  EXPECT_EQ(received->request_id, 99U);
 }
 
 }  // namespace

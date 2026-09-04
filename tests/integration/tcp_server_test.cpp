@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -169,12 +170,15 @@ TEST(TcpServer, ReturnsBusyWhenPerConnectionWorkLimitIsReached) {
   std::condition_variable gate_condition;
   bool entered = false;
   bool release = false;
+  std::atomic<std::uint64_t> rejected_request_id{};
   TcpServer server(config, [&](const protocol::Frame& request) {
     std::unique_lock lock(gate_mutex);
     entered = true;
     gate_condition.notify_all();
     gate_condition.wait(lock, [&] { return release; });
     return ping_handler(request);
+  }, [&rejected_request_id](const RequestMetadata& request) {
+    rejected_request_id.store(request.request_id, std::memory_order_release);
   });
   ASSERT_FALSE(server.start("127.0.0.1", 0U).has_value());
   const auto socket = connect_to(server.bound_port());
@@ -200,6 +204,58 @@ TEST(TcpServer, ReturnsBusyWhenPerConnectionWorkLimitIsReached) {
   });
   EXPECT_EQ(busy_count, 1);
   EXPECT_EQ(ok_count, 1);
+  EXPECT_EQ(rejected_request_id.load(std::memory_order_acquire), 2U);
+  EXPECT_EQ(server.metrics().rejected_requests_total, 1U);
+  server.stop();
+}
+
+TEST(TcpServer, CompletionQueueRejectionReportsTheOriginalRequest) {
+  net::ReactorConfig config;
+  config.max_request_size = protocol::kHeaderSize;
+  config.max_buffered_input_per_connection = protocol::kHeaderSize;
+  config.global_queued_work_bytes = protocol::kHeaderSize;
+
+  std::atomic<std::uint64_t> rejected_request_id{};
+  std::atomic<protocol::MessageType> rejected_request_type{
+      protocol::MessageType::error};
+  std::atomic<protocol::MessageType> replaced_response_type{
+      protocol::MessageType::error};
+  std::atomic<std::uint64_t> admission_rejections{};
+  TcpServer server(
+      config,
+      [](const protocol::Frame& request) {
+        auto response = ping_handler(request);
+        response.payload.push_back(std::byte{0x2a});
+        return response;
+      },
+      [&](const RequestMetadata&) {
+        admission_rejections.fetch_add(1U, std::memory_order_relaxed);
+      },
+      [&](const RequestMetadata& request,
+          const ResponseMetadata& response) {
+        rejected_request_id.store(request.request_id,
+                                  std::memory_order_release);
+        rejected_request_type.store(request.message_type,
+                                    std::memory_order_release);
+        replaced_response_type.store(response.message_type,
+                                     std::memory_order_release);
+      });
+  ASSERT_FALSE(server.start("127.0.0.1", 0U).has_value());
+  const auto socket = connect_to(server.bound_port());
+
+  send_all(socket.get(), protocol::serialize(ping(41U, "")).bytes);
+  const auto responses = receive_frames(socket.get(), 1U);
+
+  ASSERT_EQ(responses.size(), 1U);
+  EXPECT_EQ(responses.front().message_type, protocol::MessageType::busy);
+  EXPECT_EQ(responses.front().request_id, 41U);
+  EXPECT_EQ(rejected_request_id.load(std::memory_order_acquire), 41U);
+  EXPECT_EQ(rejected_request_type.load(std::memory_order_acquire),
+            protocol::MessageType::ping);
+  EXPECT_EQ(replaced_response_type.load(std::memory_order_acquire),
+            protocol::MessageType::busy);
+  EXPECT_EQ(admission_rejections.load(std::memory_order_relaxed), 0U);
+  EXPECT_EQ(server.metrics().rejected_requests_total, 1U);
   server.stop();
 }
 

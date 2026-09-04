@@ -29,7 +29,9 @@ class RaftNode final {
   Actions compact(StateMachineSnapshot snapshot);
 
   [[nodiscard]] RaftSnapshot snapshot() const;
+  [[nodiscard]] RaftStatus status() const noexcept;
   [[nodiscard]] std::optional<PeerProgress> progress(NodeId peer) const;
+  [[nodiscard]] std::optional<LogIndex> match_index(NodeId peer) const noexcept;
 
  private:
   struct Impl;

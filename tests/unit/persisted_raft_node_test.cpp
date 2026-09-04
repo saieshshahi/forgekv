@@ -349,6 +349,31 @@ TEST(PersistedRaftNodeTest, PersistenceHookFailureFaultsAndSuppressesDriver) {
   EXPECT_THROW(node.advance_time(500), std::logic_error);
 }
 
+TEST(PersistedRaftNodeTest, ThrowingSyncObserverCannotFaultConsensus) {
+  DriverDirectory directory;
+  std::size_t output_count = 0;
+  std::size_t observation_count = 0;
+  auto node = PersistedRaftNode::open(PersistedRaftOptions{
+      .config = driver_config(),
+      .data_directory = directory.path(),
+      .initial_time = 0,
+      .output = [&output_count](const Action&) { ++output_count; },
+      .crash_hook = {},
+      .sync_observer = [&observation_count](std::chrono::microseconds) {
+        ++observation_count;
+        throw std::runtime_error("telemetry sink failed");
+      },
+  });
+
+  EXPECT_NO_THROW(node.step(2, RequestVote{.term = 1,
+                                           .candidate_id = 2,
+                                           .last_log_index = 0,
+                                           .last_log_term = 0}));
+  EXPECT_FALSE(node.failed());
+  EXPECT_GT(observation_count, 0U);
+  EXPECT_GT(output_count, 0U);
+}
+
 TEST(PersistedRaftNodeTest, RestartRestoresDurableCoreState) {
   DriverDirectory directory;
   {

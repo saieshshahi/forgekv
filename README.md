@@ -93,6 +93,8 @@ All ForgeKV targets compile with:
   recovery, log compaction, and follower installation.
 - [`docs/request-deduplication.md`](docs/request-deduplication.md) defines safe
   mutation retries and their retention limits.
+- [`docs/observability.md`](docs/observability.md) defines health, readiness,
+  metrics, structured logging, and bounded-cardinality rules.
 - [`docs/raft-persistence.md`](docs/raft-persistence.md) defines the durable
   identity, hard-state, and log formats.
 

@@ -15,8 +15,13 @@ namespace forgekv::server {
 class TcpServer final {
  public:
   using Handler = RequestExecutor::Handler;
+  using RejectionObserver = std::function<void(const RequestMetadata&)>;
+  using CompletionObserver =
+      std::function<void(const RequestMetadata&, const ResponseMetadata&)>;
 
-  TcpServer(net::ReactorConfig config, Handler handler);
+  TcpServer(net::ReactorConfig config, Handler handler,
+            RejectionObserver rejection_observer = {},
+            CompletionObserver completion_observer = {});
   ~TcpServer();
 
   TcpServer(const TcpServer&) = delete;

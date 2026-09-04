@@ -95,6 +95,27 @@ TEST(RaftNodeConfig, RejectsInvalidMembershipAndTiming) {
   EXPECT_THROW(RaftNode node(heartbeat_too_slow), std::invalid_argument);
 }
 
+TEST(RaftNodeStatus, ReportsScalarsWithoutCopyingTheRetainedLog) {
+  RaftNode node(config());
+  const auto initial = node.status();
+  EXPECT_EQ(initial.self_id, 1U);
+  EXPECT_EQ(initial.role, Role::follower);
+  EXPECT_EQ(initial.current_term, 0U);
+  EXPECT_EQ(initial.last_log_index, 0U);
+  EXPECT_EQ(initial.retained_log_records, 0U);
+  EXPECT_FALSE(node.match_index(2).has_value());
+
+  static_cast<void>(elect(node));
+  const auto leader = node.status();
+  EXPECT_EQ(leader.role, Role::leader);
+  EXPECT_EQ(leader.current_term, 1U);
+  EXPECT_EQ(leader.leader_id, 1U);
+  EXPECT_EQ(leader.last_log_index, 1U);
+  EXPECT_EQ(leader.retained_log_records, 1U);
+  ASSERT_TRUE(node.match_index(2).has_value());
+  EXPECT_EQ(*node.match_index(2), 0U);
+}
+
 TEST(RaftElection, TerminalTermCannotWrapOnElection) {
   RaftNode node(config(),
                 RaftPersistentState{

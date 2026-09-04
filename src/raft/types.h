@@ -238,4 +238,15 @@ struct RaftSnapshot final {
   LogicalTime heartbeat_deadline{};
 };
 
+struct RaftStatus final {
+  NodeId self_id{};
+  Role role{Role::follower};
+  Term current_term{};
+  std::optional<NodeId> leader_id;
+  LogIndex commit_index{};
+  LogIndex last_applied{};
+  LogIndex last_log_index{};
+  std::uint64_t retained_log_records{};
+};
+
 }  // namespace forgekv::raft

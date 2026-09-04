@@ -221,6 +221,31 @@ bool send_all(const int descriptor, const std::span<const std::byte> bytes) {
   return true;
 }
 
+std::string http_get(const std::uint16_t port, const std::string_view path) {
+  auto socket = connect_to(port);
+  if (!socket.valid()) {
+    return {};
+  }
+  const auto request_text = "GET " + std::string(path) +
+                            " HTTP/1.1\r\nHost: localhost\r\n"
+                            "Connection: close\r\n\r\n";
+  const auto* begin =
+      reinterpret_cast<const std::byte*>(request_text.data());
+  if (!send_all(socket.get(),
+                std::span<const std::byte>{begin, request_text.size()})) {
+    return {};
+  }
+  std::string response;
+  std::array<char, 4096> bytes{};
+  while (true) {
+    const auto count = ::recv(socket.get(), bytes.data(), bytes.size(), 0);
+    if (count <= 0) {
+      return response;
+    }
+    response.append(bytes.data(), static_cast<std::size_t>(count));
+  }
+}
+
 std::optional<protocol::Frame> request(const std::uint16_t port,
                                        const protocol::Frame& frame) {
   auto socket = connect_to(port);
@@ -542,11 +567,14 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
   std::set<std::uint16_t> used_ports;
   std::array<std::uint16_t, 3> client_ports{};
   std::array<std::uint16_t, 3> peer_ports{};
+  std::array<std::uint16_t, 3> admin_ports{};
   for (std::size_t index = 0; index < 3U; ++index) {
     client_ports[index] = reserve_port(used_ports);
     peer_ports[index] = reserve_port(used_ports);
+    admin_ports[index] = reserve_port(used_ports);
     ASSERT_NE(client_ports[index], 0);
     ASSERT_NE(peer_ports[index], 0);
+    ASSERT_NE(admin_ports[index], 0);
   }
 
   std::vector<std::string> peer_arguments;
@@ -567,7 +595,8 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
         "--cluster-id", "4242", "--node-id", std::to_string(index + 1U),
         "--data-dir", node_directory.string(), "--client-port",
         std::to_string(client_ports[index]), "--peer-port",
-        std::to_string(peer_ports[index]), "--client-timeout-ms", "3000",
+        std::to_string(peer_ports[index]), "--admin-port",
+        std::to_string(admin_ports[index]), "--client-timeout-ms", "3000",
         "--max-pending-reads", "1",
         "--snapshot-threshold", "2",
     };
@@ -586,6 +615,26 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
   const std::set<std::size_t> all_nodes{0, 1, 2};
   const auto first_leader = find_leader(client_ports, all_nodes, request_id);
   ASSERT_TRUE(first_leader.has_value());
+  for (std::size_t index = 0; index < admin_ports.size(); ++index) {
+    EXPECT_NE(http_get(admin_ports[index], "/health").find("HTTP/1.1 200 OK"),
+              std::string::npos);
+  }
+  EXPECT_NE(http_get(admin_ports[*first_leader], "/ready")
+                .find("HTTP/1.1 200 OK"),
+            std::string::npos);
+  EXPECT_NE(http_get(admin_ports[(*first_leader + 1U) % admin_ports.size()],
+                     "/ready")
+                .find("HTTP/1.1 503 Service Unavailable"),
+            std::string::npos);
+  const auto metrics = http_get(admin_ports[*first_leader], "/metrics");
+  EXPECT_NE(metrics.find("forgekv_process_rss_bytes"), std::string::npos);
+  EXPECT_NE(metrics.find("forgekv_raft_role{role=\"leader\"} 1"),
+            std::string::npos);
+  EXPECT_NE(metrics.find("forgekv_raft_replication_lag{peer=\"" +
+                         std::to_string(*first_leader + 1U) + "\"} 0"),
+            std::string::npos);
+  EXPECT_NE(metrics.find("forgekv_storage_sync_count_total"),
+            std::string::npos);
   auto response = request(client_ports[*first_leader],
                           put(++request_id, "alpha", "one"));
   ASSERT_TRUE(response.has_value());
@@ -724,6 +773,12 @@ TEST(RealCluster, ElectsFailsOverAndCatchesUpRestartedLeader) {
   const auto second_leader = find_leader(client_ports, survivors, request_id);
   ASSERT_TRUE(second_leader.has_value());
   ASSERT_NE(*second_leader, *first_leader);
+  EXPECT_NE(http_get(admin_ports[*second_leader], "/ready")
+                .find("HTTP/1.1 200 OK"),
+            std::string::npos);
+  EXPECT_NE(http_get(admin_ports[*first_leader], "/ready")
+                .find("HTTP/1.1 503 Service Unavailable"),
+            std::string::npos);
   response = request(client_ports[*second_leader],
                      put(++request_id, "beta", "two"));
   ASSERT_TRUE(response.has_value());

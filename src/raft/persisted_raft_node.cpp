@@ -1,6 +1,7 @@
 #include "raft/persisted_raft_node.h"
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -24,11 +25,11 @@ std::uint64_t fixed_membership_fingerprint(std::vector<NodeId> voters) {
 struct PersistedRaftNode::Impl final {
   Impl(RaftConfig config, RaftStorage durable_storage,
        const LogicalTime initial_time, RaftOutputSink output_sink,
-       std::shared_ptr<RaftCrashHook> hook)
+       std::shared_ptr<RaftCrashHook> hook, RaftSyncObserver observer)
       : storage(std::move(durable_storage)),
         node(std::move(config), storage.state(), initial_time),
         output(std::move(output_sink)),
-        crash_hook(std::move(hook)) {}
+        crash_hook(std::move(hook)), sync_observer(std::move(observer)) {}
 
   void ensure_healthy() const {
     if (is_failed) {
@@ -47,8 +48,23 @@ struct PersistedRaftNode::Impl final {
     at(RaftCrashPoint::before_persist);
     storage.prepare(action);
     at(RaftCrashPoint::after_write);
+    const auto sync_started = std::chrono::steady_clock::now();
     storage.sync();
+    observe_sync(sync_started);
     at(RaftCrashPoint::after_sync);
+  }
+
+  void observe_sync(
+      const std::chrono::steady_clock::time_point started) const noexcept {
+    if (!sync_observer) {
+      return;
+    }
+    try {
+      sync_observer(std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - started));
+    } catch (...) {
+      // Telemetry is passive and cannot change a durability decision.
+    }
   }
 
   void drive(Actions actions) {
@@ -64,8 +80,10 @@ struct PersistedRaftNode::Impl final {
         } else if (const auto* snapshot =
                        std::get_if<PersistSnapshot>(&action)) {
           at(RaftCrashPoint::before_persist);
+          const auto sync_started = std::chrono::steady_clock::now();
           storage.install_snapshot(snapshot->snapshot,
                                    snapshot_already_durable);
+          observe_sync(sync_started);
           snapshot_already_durable = false;
           at(RaftCrashPoint::after_sync);
         } else {
@@ -93,6 +111,7 @@ struct PersistedRaftNode::Impl final {
   RaftNode node;
   RaftOutputSink output;
   std::shared_ptr<RaftCrashHook> crash_hook;
+  RaftSyncObserver sync_observer;
   bool is_failed{};
   bool snapshot_already_durable{};
 };
@@ -132,7 +151,8 @@ PersistedRaftNode PersistedRaftNode::open(PersistedRaftOptions options) {
                         voter_fingerprint);
   return PersistedRaftNode(std::make_unique<Impl>(
       std::move(options.config), std::move(storage), options.initial_time,
-      std::move(options.output), std::move(shared_crash_hook)));
+      std::move(options.output), std::move(shared_crash_hook),
+      std::move(options.sync_observer)));
 }
 
 PersistedRaftNode::PersistedRaftNode(std::unique_ptr<Impl> impl)
@@ -176,6 +196,20 @@ void PersistedRaftNode::compact(StateMachineSnapshot snapshot,
 
 RaftSnapshot PersistedRaftNode::snapshot() const {
   return impl_->node.snapshot();
+}
+
+RaftStatus PersistedRaftNode::status() const noexcept {
+  return impl_->node.status();
+}
+
+std::optional<PeerProgress> PersistedRaftNode::progress(
+    const NodeId peer) const {
+  return impl_->node.progress(peer);
+}
+
+std::optional<LogIndex> PersistedRaftNode::match_index(
+    const NodeId peer) const noexcept {
+  return impl_->node.match_index(peer);
 }
 
 RaftPersistentState PersistedRaftNode::durable_state() const {

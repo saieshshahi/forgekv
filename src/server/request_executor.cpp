@@ -92,7 +92,15 @@ void RequestExecutor::worker_loop() {
     }
 
     try {
-      completion_sink_(Completion{.token = request.token, .frame = std::move(response)});
+      completion_sink_(Completion{
+          .token = request.token,
+          .request = RequestMetadata{
+              .message_namespace = request.frame.message_namespace,
+              .message_type = request.frame.message_type,
+              .request_id = request.frame.request_id,
+          },
+          .frame = std::move(response),
+      });
     } catch (...) {
       // Completion delivery is best-effort during shutdown. The worker must stay alive.
     }

@@ -1017,12 +1017,34 @@ RaftSnapshot RaftNode::snapshot() const {
   };
 }
 
+RaftStatus RaftNode::status() const noexcept {
+  return RaftStatus{
+      .self_id = impl_->config.self_id,
+      .role = impl_->role,
+      .current_term = impl_->current_term,
+      .leader_id = impl_->leader_id,
+      .commit_index = impl_->commit_index,
+      .last_applied = impl_->last_applied,
+      .last_log_index = impl_->last_log_index(),
+      .retained_log_records =
+          static_cast<std::uint64_t>(impl_->log.size() - 1U),
+  };
+}
+
 std::optional<PeerProgress> RaftNode::progress(const NodeId peer) const {
   const auto found = impl_->peer_progress.find(peer);
   if (found == impl_->peer_progress.end()) {
     return std::nullopt;
   }
   return found->second;
+}
+
+std::optional<LogIndex> RaftNode::match_index(const NodeId peer) const noexcept {
+  const auto found = impl_->peer_progress.find(peer);
+  if (found == impl_->peer_progress.end()) {
+    return std::nullopt;
+  }
+  return found->second.match_index;
 }
 
 }  // namespace forgekv::raft

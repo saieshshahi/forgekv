@@ -1,7 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace forgekv::common {
@@ -15,6 +18,16 @@ enum class Severity : std::uint8_t {
   critical = 5,
   off = 6,
 };
+
+struct LogRecord final {
+  Severity severity{Severity::info};
+  std::string message;
+  std::optional<std::uint64_t> request_id;
+};
+
+[[nodiscard]] std::string format_log_record(
+    const LogRecord& record,
+    std::chrono::system_clock::time_point timestamp);
 
 [[nodiscard]] constexpr std::string_view severity_name(const Severity severity) noexcept {
   switch (severity) {
@@ -38,7 +51,8 @@ enum class Severity : std::uint8_t {
 
 class Logger final {
  public:
-  using Sink = std::function<void(Severity, std::string_view)>;
+  using Sink = std::function<void(const LogRecord&)>;
+  using LegacySink = std::function<void(Severity, std::string_view)>;
 
   Logger() = delete;
 
@@ -47,8 +61,10 @@ class Logger final {
   [[nodiscard]] static bool enabled(Severity severity) noexcept;
 
   static void set_sink(Sink sink);
+  static void set_sink(LegacySink sink);
   static void reset_sink();
-  static void write(Severity severity, std::string_view message);
+  static void write(Severity severity, std::string_view message,
+                    std::optional<std::uint64_t> request_id = {}) noexcept;
 };
 
 }  // namespace forgekv::common

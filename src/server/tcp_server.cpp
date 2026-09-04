@@ -45,15 +45,51 @@ protocol::Frame busy_response(const protocol::Frame& request) {
   };
 }
 
+RequestMetadata request_metadata(const protocol::Frame& frame) {
+  return RequestMetadata{
+      .message_namespace = frame.message_namespace,
+      .message_type = frame.message_type,
+      .request_id = frame.request_id,
+  };
+}
+
+protocol::Frame busy_response(const RequestMetadata& request) {
+  return protocol::Frame{
+      .message_namespace = protocol::Namespace::client,
+      .message_type = protocol::MessageType::busy,
+      .flags = 0U,
+      .request_id = request.request_id,
+      .payload = std::vector<std::byte>(4U, std::byte{0}),
+  };
+}
+
+ResponseMetadata response_metadata(const protocol::Frame& frame) {
+  ResponseMetadata result{.message_type = frame.message_type,
+                          .error_code = std::nullopt};
+  if (frame.message_type == protocol::MessageType::error &&
+      frame.payload.size() >= 2U) {
+    result.error_code = static_cast<std::uint16_t>(
+        (std::to_integer<std::uint16_t>(frame.payload[0]) << 8U) |
+        std::to_integer<std::uint16_t>(frame.payload[1]));
+  }
+  return result;
+}
+
 }  // namespace
 
 class TcpServer::Impl final {
  public:
-  Impl(net::ReactorConfig config, Handler handler)
+  Impl(net::ReactorConfig config, Handler handler,
+       RejectionObserver rejection_observer,
+       CompletionObserver completion_observer)
       : config_(std::move(config)),
         executor_(config_.worker_threads, config_.global_outstanding_work,
-                  config_.global_queued_work_bytes, std::move(handler),
-                  [this](Completion completion) { post_completion(std::move(completion)); }) {}
+                   config_.global_queued_work_bytes, std::move(handler),
+                   [this](Completion completion) {
+                     post_completion(std::move(completion));
+                   }),
+        rejection_observer_(std::move(rejection_observer)),
+        completion_observer_(std::move(completion_observer)) {}
 
   ~Impl() { stop(); }
 
@@ -227,11 +263,11 @@ class TcpServer::Impl final {
       connection.token = token;
       connections_.emplace(fd, std::move(connection));
       token_to_fd_.emplace(token.id, fd);
+      metrics_.connection_opened();
       if (!add_epoll_fd(fd, kBaseConnectionEvents | EPOLLIN)) {
         close_connection(fd);
         continue;
       }
-      metrics_.connection_opened();
     }
   }
 
@@ -298,6 +334,7 @@ class TcpServer::Impl final {
     if (connection.pending_request_count >=
             config_.max_requests_in_flight_per_connection ||
         global_outstanding_ >= config_.global_outstanding_work) {
+      observe_rejection(request_metadata(frame));
       const auto queued = queue_response(connection, busy_response(frame));
       set_backpressured(connection, true);
       return queued;
@@ -307,6 +344,7 @@ class TcpServer::Impl final {
                     .frame = std::move(frame),
                     .wire_bytes = wire_bytes};
     if (!executor_.try_submit(std::move(request))) {
+      observe_rejection(request_metadata(request.frame));
       const auto queued = queue_response(connection, busy_response(request.frame));
       set_backpressured(connection, true);
       return queued;
@@ -319,6 +357,18 @@ class TcpServer::Impl final {
       set_backpressured(connection, true);
     }
     return true;
+  }
+
+  void observe_rejection(const RequestMetadata& request) noexcept {
+    metrics_.request_rejected();
+    if (!rejection_observer_) {
+      return;
+    }
+    try {
+      rejection_observer_(request);
+    } catch (...) {
+      // Telemetry cannot change overload behavior.
+    }
   }
 
   bool queue_response(net::Connection& connection, const protocol::Frame& frame) {
@@ -378,16 +428,32 @@ class TcpServer::Impl final {
   }
 
   void post_completion(Completion completion) {
-    const auto completion_bytes = protocol::kHeaderSize + completion.frame.payload.size();
+    const auto completion_bytes =
+        protocol::kHeaderSize + completion.frame.payload.size();
+    bool rejected = false;
+    const auto request = completion.request;
+    ResponseMetadata response;
     {
       const std::lock_guard lock(completion_mutex_);
       if (completion_bytes > config_.global_queued_work_bytes -
                                  std::min(completion_bytes_,
                                           config_.global_queued_work_bytes)) {
-        completion.frame = busy_response(completion.frame);
+        completion.frame = busy_response(completion.request);
+        rejected = true;
       }
+      response = response_metadata(completion.frame);
       completion_bytes_ += protocol::kHeaderSize + completion.frame.payload.size();
       completions_.push_back(std::move(completion));
+    }
+    if (rejected) {
+      metrics_.request_rejected();
+    }
+    if (completion_observer_) {
+      try {
+        completion_observer_(request, response);
+      } catch (...) {
+        // Telemetry cannot change response delivery.
+      }
     }
     wake_reactor();
   }
@@ -528,6 +594,8 @@ class TcpServer::Impl final {
   net::ReactorConfig config_;
   net::Metrics metrics_;
   RequestExecutor executor_;
+  RejectionObserver rejection_observer_;
+  CompletionObserver completion_observer_;
 
   mutable std::mutex lifecycle_mutex_;
   std::condition_variable lifecycle_condition_;
@@ -552,8 +620,12 @@ class TcpServer::Impl final {
   std::size_t completion_bytes_{0U};
 };
 
-TcpServer::TcpServer(net::ReactorConfig config, Handler handler)
-    : impl_(std::make_unique<Impl>(std::move(config), std::move(handler))) {}
+TcpServer::TcpServer(net::ReactorConfig config, Handler handler,
+                     RejectionObserver rejection_observer,
+                     CompletionObserver completion_observer)
+    : impl_(std::make_unique<Impl>(std::move(config), std::move(handler),
+                                   std::move(rejection_observer),
+                                   std::move(completion_observer))) {}
 
 TcpServer::~TcpServer() = default;
 

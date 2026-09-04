@@ -7,6 +7,7 @@ add_executable(forgekv_unit_tests
   unit/kv_store_test.cpp
   unit/net_config_test.cpp
   unit/net_metrics_test.cpp
+  unit/observability_test.cpp
   unit/parser_test.cpp
   unit/persisted_raft_node_test.cpp
   unit/raft_node_test.cpp
@@ -35,6 +36,7 @@ target_link_libraries(forgekv_unit_tests PRIVATE
 gtest_discover_tests(forgekv_unit_tests DISCOVERY_MODE PRE_TEST)
 
 add_executable(forgekv_integration_tests
+  integration/admin_server_test.cpp
   integration/real_cluster_test.cpp
   integration/storage_recovery_test.cpp
   integration/tcp_server_test.cpp

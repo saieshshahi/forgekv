@@ -5,9 +5,11 @@
 
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -19,8 +21,20 @@ struct Request {
   std::size_t wire_bytes{0U};
 };
 
+struct RequestMetadata {
+  protocol::Namespace message_namespace{protocol::Namespace::client};
+  protocol::MessageType message_type{protocol::MessageType::error};
+  std::uint64_t request_id{0U};
+};
+
+struct ResponseMetadata {
+  protocol::MessageType message_type{protocol::MessageType::error};
+  std::optional<std::uint16_t> error_code;
+};
+
 struct Completion {
   net::ConnectionToken token;
+  RequestMetadata request;
   protocol::Frame frame;
 };
 

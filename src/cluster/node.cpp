@@ -1,13 +1,16 @@
 #include "cluster/node.h"
 
 #include "cluster/codecs.h"
+#include "cluster/observability.h"
 #include "cluster/snapshot_codec.h"
 #include "cluster/state_machine.h"
+#include "common/logging.h"
 #include "protocol/parser.h"
 #include "protocol/serializer.h"
 #include "protocol/wire.h"
 #include "raft/persisted_raft_node.h"
 #include "raft/snapshot_store.h"
+#include "server/admin_server.h"
 #include "server/tcp_server.h"
 
 #include <arpa/inet.h>
@@ -180,13 +183,16 @@ Socket connect_with_timeout(const std::string& host, const std::uint16_t port,
   return Socket{};
 }
 
-bool send_all(const int descriptor, const std::span<const std::byte> bytes) {
+bool send_all(const int descriptor, const std::span<const std::byte> bytes,
+              net::Metrics& metrics) {
   std::size_t offset = 0;
   while (offset < bytes.size()) {
     const auto result = ::send(descriptor, bytes.data() + offset,
                                bytes.size() - offset, MSG_NOSIGNAL);
     if (result > 0) {
-      offset += static_cast<std::size_t>(result);
+      const auto count = static_cast<std::size_t>(result);
+      offset += count;
+      metrics.add_bytes_written(count);
     } else if (result < 0 && errno == EINTR) {
       continue;
     } else {
@@ -196,12 +202,14 @@ bool send_all(const int descriptor, const std::span<const std::byte> bytes) {
   return true;
 }
 
-std::optional<protocol::Frame> receive_one_frame(const int descriptor) {
+std::optional<protocol::Frame> receive_one_frame(const int descriptor,
+                                                 net::Metrics& metrics) {
   protocol::Parser parser;
   std::array<std::byte, 64U * 1024U> buffer{};
   while (true) {
     const auto result = ::recv(descriptor, buffer.data(), buffer.size(), 0);
     if (result > 0) {
+      metrics.add_bytes_read(static_cast<std::size_t>(result));
       auto batch = parser.consume(std::span<const std::byte>{buffer}.first(
           static_cast<std::size_t>(result)));
       if (!batch.ok() || batch.frames.size() > 1U) {
@@ -260,6 +268,50 @@ std::size_t peer_work_bytes(const raft::SendMessage& work) {
         return size;
       },
       work.message);
+}
+
+net::MetricsSnapshot combine_network_metrics(const net::MetricsSnapshot& left,
+                                             const net::MetricsSnapshot& right) {
+  return net::MetricsSnapshot{
+      .active_connections = left.active_connections + right.active_connections,
+      .accepted_connections_total =
+          left.accepted_connections_total + right.accepted_connections_total,
+      .closed_connections_total =
+          left.closed_connections_total + right.closed_connections_total,
+      .bytes_read_total = left.bytes_read_total + right.bytes_read_total,
+      .bytes_written_total =
+          left.bytes_written_total + right.bytes_written_total,
+      .requests_in_flight = left.requests_in_flight + right.requests_in_flight,
+      .read_buffer_bytes = left.read_buffer_bytes + right.read_buffer_bytes,
+      .write_buffer_bytes = left.write_buffer_bytes + right.write_buffer_bytes,
+      .connections_backpressured =
+          left.connections_backpressured + right.connections_backpressured,
+      .backpressure_events_total =
+          left.backpressure_events_total + right.backpressure_events_total,
+      .rejected_requests_total =
+          left.rejected_requests_total + right.rejected_requests_total,
+  };
+}
+
+std::vector<raft::NodeId> voter_ids(const ClusterNodeConfig& config) {
+  std::vector<raft::NodeId> voters;
+  voters.reserve(config.peers.size());
+  for (const auto& peer : config.peers) {
+    voters.push_back(peer.node_id);
+  }
+  return voters;
+}
+
+std::string_view role_text(const raft::Role role) {
+  switch (role) {
+    case raft::Role::follower:
+      return "follower";
+    case raft::Role::candidate:
+      return "candidate";
+    case raft::Role::leader:
+      return "leader";
+  }
+  return "unknown";
 }
 
 enum class ClientStatus {
@@ -322,6 +374,7 @@ class PeerTransport final {
       if (existing != queue_.end()) {
         const auto remaining = queued_bytes_ - existing->bytes;
         if (bytes > byte_capacity_ - remaining) {
+          metrics_.request_rejected();
           return false;
         }
         queued_bytes_ = remaining + bytes;
@@ -329,6 +382,7 @@ class PeerTransport final {
                                    .bytes = bytes};
       } else {
         if (queue_.size() >= capacity_ || bytes > byte_capacity_ - queued_bytes_) {
+          metrics_.request_rejected();
           return false;
         }
         queued_bytes_ += bytes;
@@ -352,6 +406,10 @@ class PeerTransport final {
 
   [[nodiscard]] bool enabled() const noexcept {
     return enabled_.load(std::memory_order_acquire);
+  }
+
+  [[nodiscard]] net::MetricsSnapshot metrics() const noexcept {
+    return metrics_.snapshot();
   }
 
   void stop() {
@@ -411,10 +469,22 @@ class PeerTransport final {
         }
         auto socket = connect_with_timeout(peer->second.host,
                                            peer->second.peer_port, timeout_ms_);
-        if (!socket.valid() || !send_all(socket.get(), wire_frame.bytes)) {
+        if (!socket.valid()) {
           continue;
         }
-        auto response_frame = receive_one_frame(socket.get());
+        metrics_.connection_opened();
+        metrics_.request_started();
+        struct Observation final {
+          net::Metrics& metrics;
+          ~Observation() {
+            metrics.request_finished();
+            metrics.connection_closed();
+          }
+        } observation{metrics_};
+        if (!send_all(socket.get(), wire_frame.bytes, metrics_)) {
+          continue;
+        }
+        auto response_frame = receive_one_frame(socket.get(), metrics_);
         if (!response_frame.has_value() ||
             response_frame->request_id != request_id) {
           continue;
@@ -444,6 +514,7 @@ class PeerTransport final {
   std::uint32_t timeout_ms_;
   std::size_t worker_count_;
   ResponseSink response_sink_;
+  net::Metrics metrics_;
   std::unordered_map<raft::NodeId, PeerAddress> peers_;
   std::atomic<std::uint64_t> next_request_id_{1};
   std::atomic<bool> enabled_{true};
@@ -536,11 +607,14 @@ class ClusterNode::Impl final {
  public:
   explicit Impl(ClusterNodeConfig config)
       : config_(std::move(config)),
+        metrics_(voter_ids(config_)),
         transport_(config_, [this](const raft::NodeId from,
                                    raft::Message response) {
           static_cast<void>(post(PeerResponse{.from = from,
                                               .message = std::move(response)}));
-        }) {}
+        }) {
+    raft_metrics_observation_.peer_match.reserve(config_.peers.size() + 1U);
+  }
 
   ~Impl() { stop(); }
 
@@ -579,6 +653,11 @@ class ClusterNode::Impl final {
     client_server_ = std::make_unique<server::TcpServer>(
         net::ReactorConfig{}, [this](const protocol::Frame& request) {
           return handle_client(request);
+        }, [this](const server::RequestMetadata& request) {
+          metrics_.request_rejected(request_operation(request.message_type));
+        }, [this](const server::RequestMetadata&,
+                  const server::ResponseMetadata& response) {
+          metrics_.request_outcome(request_outcome(response));
         });
     if (const auto error =
             client_server_->start(config_.bind_address, config_.client_port);
@@ -586,18 +665,34 @@ class ClusterNode::Impl final {
       stop();
       return "client listener: " + *error;
     }
+    admin_server_ = std::make_unique<server::AdminServer>(
+        [this](const std::string_view path) { return handle_admin(path); });
+    if (const auto error = admin_server_->start(config_.admin_bind_address,
+                                                config_.admin_port);
+        error.has_value()) {
+      stop();
+      return "admin listener: " + *error;
+    }
+    FORGEKV_LOG(common::Severity::info,
+                "cluster_node_started node_id=" +
+                    std::to_string(config_.node_id));
     return std::nullopt;
   }
 
   void stop() {
-    std::deque<Work> cancelled;
+    stopping_atomic_.store(true, std::memory_order_release);
+    if (admin_server_) {
+      admin_server_->stop();
+    }
+    std::deque<QueuedWork> cancelled;
     {
       const std::lock_guard lock(queue_mutex_);
       stopping_ = true;
       cancelled.swap(queue_);
     }
+    metrics_.set_queue_depth(0);
     for (auto& work : cancelled) {
-      cancel(work);
+      cancel(work.work);
     }
     queue_condition_.notify_all();
     if (owner_thread_.joinable()) {
@@ -620,11 +715,26 @@ class ClusterNode::Impl final {
     return peer_server_ ? peer_server_->bound_port() : 0;
   }
 
+  std::uint16_t admin_port() const noexcept {
+    return admin_server_ ? admin_server_->bound_port() : 0;
+  }
+
   bool failed() const noexcept {
     return failed_.load(std::memory_order_acquire);
   }
 
+  bool healthy() const noexcept {
+    return owner_available_.load(std::memory_order_acquire) && !failed() &&
+           !stopping_atomic_.load(std::memory_order_acquire);
+  }
+
+  bool ready() const noexcept {
+    return healthy() && peer_traffic_enabled_.load(std::memory_order_acquire) &&
+           published_role_.load(std::memory_order_acquire) == raft::Role::leader;
+  }
+
   void set_peer_traffic_enabled(const bool enabled) {
+    peer_traffic_enabled_.store(enabled, std::memory_order_release);
     transport_.set_enabled(enabled);
   }
 
@@ -648,6 +758,10 @@ class ClusterNode::Impl final {
     raft::Message message;
   };
   using Work = std::variant<Proposal, Read, PeerRequest, PeerResponse>;
+  struct QueuedWork final {
+    Work work;
+    std::chrono::steady_clock::time_point enqueued;
+  };
 
   struct PendingMutation final {
     std::vector<std::byte> command;
@@ -719,9 +833,12 @@ class ClusterNode::Impl final {
     {
       const std::lock_guard lock(queue_mutex_);
       if (stopping_ || queue_.size() >= config_.raft_queue_capacity) {
+        metrics_.queue_rejected();
         return false;
       }
-      queue_.push_back(std::move(work));
+      queue_.push_back(QueuedWork{.work = std::move(work),
+                                  .enqueued = std::chrono::steady_clock::now()});
+      metrics_.set_queue_depth(queue_.size());
     }
     queue_condition_.notify_one();
     return true;
@@ -768,7 +885,117 @@ class ClusterNode::Impl final {
     return error_response(request, 2, "unknown operation result");
   }
 
+  static RequestOperation request_operation(const protocol::Frame& request) {
+    return request_operation(request.message_type);
+  }
+
+  static RequestOperation request_operation(
+      const protocol::MessageType message_type) {
+    switch (message_type) {
+      case protocol::MessageType::put:
+        return RequestOperation::put;
+      case protocol::MessageType::get:
+        return RequestOperation::get;
+      case protocol::MessageType::delete_key:
+        return RequestOperation::delete_key;
+      default:
+        return RequestOperation::ping;
+    }
+  }
+
+  static RequestOutcome request_outcome(const protocol::Frame& response) {
+    switch (response.message_type) {
+      case protocol::MessageType::ok:
+        return RequestOutcome::ok;
+      case protocol::MessageType::not_found:
+        return RequestOutcome::not_found;
+      case protocol::MessageType::redirect:
+        return RequestOutcome::redirect;
+      case protocol::MessageType::busy:
+        return RequestOutcome::busy;
+      case protocol::MessageType::error: {
+        if (response.payload.size() < 2U) {
+          return RequestOutcome::internal;
+        }
+        const auto code = static_cast<std::uint16_t>(
+            (std::to_integer<std::uint16_t>(response.payload[0]) << 8U) |
+            std::to_integer<std::uint16_t>(response.payload[1]));
+        switch (code) {
+          case 1:
+            return RequestOutcome::invalid;
+          case 3:
+            return RequestOutcome::request_id_reuse;
+          case 4:
+            return RequestOutcome::stale_request;
+          case 5:
+            return RequestOutcome::capacity_exceeded;
+          default:
+            return RequestOutcome::internal;
+        }
+      }
+      default:
+        return RequestOutcome::internal;
+    }
+  }
+
+  static RequestOutcome request_outcome(
+      const server::ResponseMetadata& response) {
+    switch (response.message_type) {
+      case protocol::MessageType::ok:
+        return RequestOutcome::ok;
+      case protocol::MessageType::not_found:
+        return RequestOutcome::not_found;
+      case protocol::MessageType::redirect:
+        return RequestOutcome::redirect;
+      case protocol::MessageType::busy:
+        return RequestOutcome::busy;
+      case protocol::MessageType::error:
+        switch (response.error_code.value_or(0U)) {
+          case 1:
+            return RequestOutcome::invalid;
+          case 3:
+            return RequestOutcome::request_id_reuse;
+          case 4:
+            return RequestOutcome::stale_request;
+          case 5:
+            return RequestOutcome::capacity_exceeded;
+          default:
+            return RequestOutcome::internal;
+        }
+      default:
+        return RequestOutcome::internal;
+    }
+  }
+
   protocol::Frame handle_client(const protocol::Frame& request) {
+    const auto operation = request_operation(request);
+    const auto started = std::chrono::steady_clock::now();
+    metrics_.request_started(operation);
+    try {
+      auto response = handle_client_impl(request);
+      const auto outcome = request_outcome(response);
+      metrics_.request_finished(
+          operation,
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - started));
+      if (outcome == RequestOutcome::internal) {
+        common::Logger::write(common::Severity::error,
+                              "client_request_internal_error",
+                              request.request_id);
+      }
+      return response;
+    } catch (...) {
+      metrics_.request_finished(
+          operation,
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - started));
+      common::Logger::write(common::Severity::error,
+                            "client_request_exception", request.request_id);
+      throw;
+    }
+  }
+
+  protocol::Frame handle_client_impl(const protocol::Frame& request) {
     if (request.message_namespace != protocol::Namespace::client) {
       return error_response(request, 1, "client port requires client namespace");
     }
@@ -834,6 +1061,9 @@ class ClusterNode::Impl final {
         !known_source || !is_request_message(decoded.value->message)) {
       throw std::invalid_argument("invalid peer request: " + decoded.error);
     }
+    if (std::holds_alternative<raft::AppendEntries>(decoded.value->message)) {
+      metrics_.append_entries();
+    }
     auto completion = std::make_shared<std::promise<raft::Message>>();
     auto future = completion->get_future();
     const auto source = decoded.value->from;
@@ -852,11 +1082,8 @@ class ClusterNode::Impl final {
 
   void owner_loop() {
     try {
-      std::vector<raft::NodeId> voters;
-      voters.reserve(config_.peers.size());
-      for (const auto& peer : config_.peers) {
-        voters.push_back(peer.node_id);
-      }
+      auto voters = voter_ids(config_);
+      const auto recovery_started = std::chrono::steady_clock::now();
       node_ = std::make_unique<raft::PersistedRaftNode>(
           raft::PersistedRaftNode::open(raft::PersistedRaftOptions{
               .config = raft::RaftConfig{
@@ -872,7 +1099,13 @@ class ClusterNode::Impl final {
               .initial_time = 0,
               .output = [this](const raft::Action& action) { on_action(action); },
               .crash_hook = {},
+              .sync_observer = [this](const std::chrono::microseconds duration) {
+                metrics_.observe_sync(duration);
+              },
           }));
+      metrics_.recovery_finished(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - recovery_started));
       const auto snapshot = node_->snapshot();
       if (snapshot.durable_snapshot.has_value()) {
         auto decoded = decode_snapshot_state(
@@ -884,10 +1117,12 @@ class ClusterNode::Impl final {
         state_machine_.restore(std::move(*decoded.value));
       }
       role_ = snapshot.role;
+      published_role_.store(snapshot.role, std::memory_order_release);
       leader_id_ = snapshot.leader_id;
       last_snapshot_index_ = snapshot.durable_snapshot.has_value()
                                  ? snapshot.durable_snapshot->last_included_index
                                  : 0;
+      publish_raft_metrics(node_->status());
     } catch (const std::exception& error) {
       {
         const std::lock_guard lock(startup_mutex_);
@@ -901,12 +1136,13 @@ class ClusterNode::Impl final {
       const std::lock_guard lock(startup_mutex_);
       owner_ready_ = true;
     }
+    owner_available_.store(true, std::memory_order_release);
     startup_condition_.notify_all();
 
     const auto started = std::chrono::steady_clock::now();
     auto next_tick = started;
     while (true) {
-      std::optional<Work> work;
+      std::optional<QueuedWork> work;
       {
         std::unique_lock lock(queue_mutex_);
         queue_condition_.wait_until(lock, next_tick, [this] {
@@ -918,6 +1154,7 @@ class ClusterNode::Impl final {
         if (!queue_.empty()) {
           work.emplace(std::move(queue_.front()));
           queue_.pop_front();
+          metrics_.set_queue_depth(queue_.size());
         }
       }
       try {
@@ -931,15 +1168,30 @@ class ClusterNode::Impl final {
         }
         expire_pending_reads(now);
         if (work.has_value()) {
-          std::visit([this](auto& typed) { process(typed); }, *work);
+          metrics_.observe_queueing(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  now - work->enqueued));
+          std::visit([this](auto& typed) { process(typed); }, work->work);
         }
         poll_snapshot_creation();
-      } catch (const std::exception&) {
+        publish_raft_metrics(node_->status());
+      } catch (const raft::RaftStorageError& error) {
+        common::Logger::write(common::Severity::critical,
+                              std::string("raft_persistence_failed detail=") +
+                                  error.what());
+        fail_pending(ClientStatus::failed);
+        failed_.store(true, std::memory_order_release);
+        break;
+      } catch (const std::exception& error) {
+        common::Logger::write(common::Severity::critical,
+                              std::string("raft_owner_failed detail=") +
+                                  error.what());
         fail_pending(ClientStatus::failed);
         failed_.store(true, std::memory_order_release);
         break;
       }
     }
+    owner_available_.store(false, std::memory_order_release);
     fail_pending(ClientStatus::retry);
   }
 
@@ -1029,6 +1281,9 @@ class ClusterNode::Impl final {
 
   void on_action(const raft::Action& action) {
     if (const auto* send = std::get_if<raft::SendMessage>(&action)) {
+      if (std::holds_alternative<raft::AppendEntries>(send->message)) {
+        metrics_.append_entries();
+      }
       if (!is_request_message(send->message) && active_peer_from_.has_value() &&
           send->to == *active_peer_from_) {
         active_peer_response_ = send->message;
@@ -1041,7 +1296,17 @@ class ClusterNode::Impl final {
       const bool lost_leadership = role_ == raft::Role::leader &&
                                    role->to != raft::Role::leader;
       role_ = role->to;
+      published_role_.store(role->to, std::memory_order_release);
       leader_id_ = role->leader_id;
+      FORGEKV_LOG(common::Severity::info,
+                  "raft_role_changed node_id=" +
+                      std::to_string(config_.node_id) + " from=" +
+                      std::string(role_text(role->from)) + " to=" +
+                      std::string(role_text(role->to)));
+      if ((role->to == raft::Role::leader) !=
+          (role->from == raft::Role::leader)) {
+        metrics_.leadership_changed();
+      }
       if (lost_leadership) {
         fail_pending(ClientStatus::retry);
       }
@@ -1181,10 +1446,12 @@ class ClusterNode::Impl final {
       voters.push_back(peer.node_id);
     }
     const auto membership = raft::fixed_membership_fingerprint(voters);
+    auto* const metrics = &metrics_;
     snapshot_future_.emplace(std::async(
         std::launch::async,
-        [directory, cluster_id, node_id, membership, index, term,
+        [directory, cluster_id, node_id, membership, index, term, metrics,
          state = std::move(state_copy)]() mutable {
+          const auto started = std::chrono::steady_clock::now();
           raft::StateMachineSnapshot snapshot{
               .last_included_index = index,
               .last_included_term = term,
@@ -1192,8 +1459,87 @@ class ClusterNode::Impl final {
           };
           raft::SnapshotStore::write_atomic(directory, cluster_id, node_id,
                                             membership, snapshot);
+          metrics->observe_snapshot(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - started));
           return snapshot;
         }));
+  }
+
+  void publish_raft_metrics(const raft::RaftStatus& status) {
+    if (status.role == raft::Role::candidate &&
+        status.current_term > last_election_term_) {
+      last_election_term_ = status.current_term;
+      metrics_.election_started();
+    }
+    auto& observation = raft_metrics_observation_;
+    observation.role = status.role;
+    observation.term = status.current_term;
+    observation.leader_id = status.leader_id;
+    observation.commit_index = status.commit_index;
+    observation.last_applied = status.last_applied;
+    observation.last_log_index = status.last_log_index;
+    observation.retained_log_records = status.retained_log_records;
+    observation.peer_match.clear();
+    if (status.role == raft::Role::leader) {
+      observation.peer_match.emplace_back(config_.node_id,
+                                          status.last_log_index);
+      for (const auto& peer : config_.peers) {
+        if (peer.node_id == config_.node_id) {
+          continue;
+        }
+        const auto match = node_->match_index(peer.node_id);
+        if (match.has_value()) {
+          observation.peer_match.emplace_back(peer.node_id,
+                                              *match);
+        }
+      }
+    }
+    metrics_.set_raft(observation);
+  }
+
+  server::AdminResponse handle_admin(const std::string_view path) {
+    if (path == "/health") {
+      const bool value = healthy();
+      return server::AdminResponse{
+          .status = value ? 200 : 503,
+          .content_type = "application/json",
+          .body = value ? "{\"status\":\"healthy\"}\n"
+                        : "{\"status\":\"unhealthy\"}\n"};
+    }
+    if (path == "/ready") {
+      const bool value = ready();
+      const auto role = role_text(published_role_.load(std::memory_order_acquire));
+      return server::AdminResponse{
+          .status = value ? 200 : 503,
+          .content_type = "application/json",
+          .body = "{\"status\":\"" +
+                  std::string(value ? "ready" : "not_ready") +
+                  "\",\"role\":\"" + std::string(role) + "\"}\n"};
+    }
+    if (path == "/metrics") {
+      auto snapshot = metrics_.snapshot();
+      std::error_code error;
+      const auto bytes =
+          std::filesystem::file_size(config_.data_directory / "raft-log.wal",
+                                     error);
+      if (!error) {
+        snapshot.wal_bytes = bytes;
+      }
+      return server::AdminResponse{
+          .status = 200,
+          .content_type = "text/plain; version=0.0.4; charset=utf-8",
+          .body = render_prometheus(
+              snapshot, sample_process_metrics(),
+              client_server_ ? client_server_->metrics() : net::MetricsSnapshot{},
+              combine_network_metrics(
+                  peer_server_ ? peer_server_->metrics()
+                               : net::MetricsSnapshot{},
+                  transport_.metrics()))};
+    }
+    return server::AdminResponse{.status = 404,
+                                 .content_type = "text/plain; charset=utf-8",
+                                 .body = "not found\n"};
   }
 
   void poll_snapshot_creation() {
@@ -1202,7 +1548,16 @@ class ClusterNode::Impl final {
             std::future_status::ready) {
       return;
     }
-    auto completed = snapshot_future_->get();
+    raft::StateMachineSnapshot completed;
+    try {
+      completed = snapshot_future_->get();
+    } catch (const std::exception& error) {
+      snapshot_future_.reset();
+      common::Logger::write(common::Severity::critical,
+                            std::string("snapshot_failed detail=") +
+                                error.what());
+      throw;
+    }
     snapshot_future_.reset();
     const auto current = node_->snapshot();
     const auto current_base = current.durable_snapshot.has_value()
@@ -1265,9 +1620,11 @@ class ClusterNode::Impl final {
   }
 
   ClusterNodeConfig config_;
+  OperationalMetrics metrics_;
   PeerTransport transport_;
   std::unique_ptr<server::TcpServer> client_server_;
   std::unique_ptr<server::TcpServer> peer_server_;
+  std::unique_ptr<server::AdminServer> admin_server_;
   std::unique_ptr<raft::PersistedRaftNode> node_;
   std::thread owner_thread_;
 
@@ -1281,7 +1638,7 @@ class ClusterNode::Impl final {
 
   std::mutex queue_mutex_;
   std::condition_variable queue_condition_;
-  std::deque<Work> queue_;
+  std::deque<QueuedWork> queue_;
   bool stopping_{};
 
   raft::Role role_{raft::Role::follower};
@@ -1295,7 +1652,13 @@ class ClusterNode::Impl final {
   ReplicatedStateMachine state_machine_;
   std::optional<std::future<raft::StateMachineSnapshot>> snapshot_future_;
   raft::LogIndex last_snapshot_index_{};
+  raft::Term last_election_term_{};
+  RaftObservation raft_metrics_observation_;
   std::atomic<bool> failed_{};
+  std::atomic<bool> owner_available_{};
+  std::atomic<bool> stopping_atomic_{};
+  std::atomic<bool> peer_traffic_enabled_{true};
+  std::atomic<raft::Role> published_role_{raft::Role::follower};
 };
 
 ClusterNode::ClusterNode(ClusterNodeConfig config)
@@ -1313,8 +1676,13 @@ std::uint16_t ClusterNode::client_port() const noexcept {
 std::uint16_t ClusterNode::peer_port() const noexcept {
   return impl_->peer_port();
 }
+std::uint16_t ClusterNode::admin_port() const noexcept {
+  return impl_->admin_port();
+}
 bool ClusterNode::failed() const noexcept {
   return impl_->failed();
 }
+bool ClusterNode::healthy() const noexcept { return impl_->healthy(); }
+bool ClusterNode::ready() const noexcept { return impl_->ready(); }
 
 }  // namespace forgekv::cluster
