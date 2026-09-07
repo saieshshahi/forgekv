@@ -12,6 +12,7 @@ add_executable(forgekv_unit_tests
   unit/kv_store_test.cpp
   unit/net_config_test.cpp
   unit/net_metrics_test.cpp
+  unit/netem_test.cpp
   unit/observability_test.cpp
   unit/parser_test.cpp
   unit/persisted_raft_node_test.cpp
