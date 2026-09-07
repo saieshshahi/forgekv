@@ -225,7 +225,8 @@ int main(const int argc, char** argv) {
               << (result.summary.restart_verified ? "true" : "false")
               << " attempts=" << result.summary.attempts
               << " acknowledged_writes="
-              << result.summary.acknowledged_writes;
+              << result.summary.acknowledged_writes
+              << " actions=" << result.summary.actions;
     if (!result.ok()) {
       std::cout << " diagnostic=" << result.diagnostic;
     }

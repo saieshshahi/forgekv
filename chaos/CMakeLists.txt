@@ -4,6 +4,8 @@ add_library(forgekv_chaos_core
   fault_proxy.cpp
   harness.cpp
   netem.cpp
+  netem_runner.cpp
+  process_runner.cpp
   process_cluster.cpp
   scheduler.cpp
   verifier.cpp
