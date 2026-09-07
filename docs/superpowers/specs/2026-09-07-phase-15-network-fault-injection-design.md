@@ -49,14 +49,14 @@ normal bounded artifacts.
 
 ### Disposable namespace runner
 
-`scripts/run-netem-matrix.sh` is the privileged experiment boundary. A normal
-invocation re-executes through a documented root mechanism; CI or operators may
-invoke the privileged form directly. For each profile it:
+`forgekv-netem` is the privileged experiment boundary. Operators invoke it
+through a documented root mechanism. For each profile it:
 
 1. creates a uniquely named Linux network namespace;
-2. enables only that namespace's loopback device;
-3. applies a root `netem` qdisc to that isolated loopback device;
-4. runs `forgekv-chaos --no-chaos` inside the namespace;
+2. enables only that namespace's loopback device through direct `ip` execution;
+3. applies a root `netem` qdisc to that isolated loopback device through a
+   fixed argument vector;
+4. runs `forgekv-chaos --no-chaos` inside the namespace as a bounded child;
 5. captures the installed qdisc statistics and campaign result;
 6. removes the qdisc and namespace through an unconditional cleanup trap.
 
@@ -173,4 +173,3 @@ gated in ordinary CI, but Phase 15 completion requires one recorded local run.
   asymmetric routing, or NIC queue behavior in this phase.
 - The quick matrix is a correctness/behavior campaign, not statistically sound
   performance benchmarking. Phase 16 owns controlled trials and variance.
-

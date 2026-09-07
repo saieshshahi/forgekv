@@ -7,6 +7,8 @@ architecture and correctness contracts live in [`docs/`](docs/).
 The repository also includes a real multi-process, seeded chaos harness. See
 [deterministic chaos testing](docs/chaos-testing.md) for campaigns, retained
 artifacts, exact acknowledged-state verification, and replay.
+Real kernel latency, loss, jitter, and reordering experiments use disposable
+network namespaces; see [network fault injection](docs/network-fault-injection.md).
 
 ## Prerequisites
 
@@ -58,6 +60,8 @@ The configured build targets are:
   multi-process Raft-backed KV service;
 - `forgekv_sim` and `forgekv_raft_sim`: deterministic cluster simulator library
   and seeded stress runner;
+- `forgekv-chaos` and `forgekv-netem`: multi-process fault campaigns and a safe,
+  namespace-confined kernel packet-impairment runner;
 - `forgekv_unit_tests`: GoogleTest unit test executable; and
 - `forgekv_benchmarks`: Google Benchmark executable.
 
@@ -99,6 +103,8 @@ All ForgeKV targets compile with:
   mutation retries and their retention limits.
 - [`docs/observability.md`](docs/observability.md) defines health, readiness,
   metrics, structured logging, and bounded-cardinality rules.
+- [`docs/network-fault-injection.md`](docs/network-fault-injection.md) separates
+  partitions, proxy connection resets, and real kernel packet impairment.
 - [`docs/raft-persistence.md`](docs/raft-persistence.md) defines the durable
   identity, hard-state, and log formats.
 

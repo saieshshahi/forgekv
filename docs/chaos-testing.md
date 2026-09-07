@@ -20,11 +20,19 @@ but failed an invariant, and exit 2 means command-line or replay input was
 invalid.
 
 The scheduler can kill or pause nodes, restart dead nodes, partition a node,
-isolate a leader, add latency or jitter, drop a seeded percentage of chunks,
+isolate a leader, add latency or jitter, reset a seeded percentage of streams,
 heal links, and force rapid leader churn. Every directed peer path has its own
-bounded TCP proxy. A partition closes existing streams; a dropped or
-over-capacity chunk fails the stream instead of silently creating unbounded
-memory pressure.
+bounded TCP proxy. A partition closes existing streams and refuses traffic until
+healed. The historical timeline spelling `set_loss` means a deterministic proxy
+chunk drop followed by a connection reset; it is retained for replay
+compatibility and is **not** kernel packet loss. An over-capacity chunk also
+fails the stream instead of silently creating unbounded memory pressure.
+
+Use `--no-chaos` to keep the concurrent client workload, child monitoring,
+convergence checks, exact state verification, log scanning, and complete durable
+restart while scheduling zero process or proxy faults. Phase 15 uses this mode
+under real kernel packet impairment. See
+[network fault injection](network-fault-injection.md).
 
 Rapid leader churn is admitted only when the remaining running voters can form
 a quorum. It heals peer links first, kills the current leader, waits for its
@@ -74,7 +82,7 @@ Replay realized choices with:
 
 Replay loads the original node count, client count, duration, action interval,
 and seed from the adjacent `config.json`. The seed makes scheduler, client IDs,
-cluster ID, and proxy loss decisions stable, while the timeline fixes realized
+cluster ID, and proxy reset decisions stable, while the timeline fixes realized
 actions. OS scheduling, TCP timing, election timing, and process interleavings
 are intentionally not claimed to be bit-for-bit reproducible.
 

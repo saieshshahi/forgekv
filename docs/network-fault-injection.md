@@ -1,0 +1,112 @@
+# Network fault injection
+
+Phase 15 adds real Linux kernel packet impairment around ForgeKV's multi-process
+cluster. `forgekv-netem` creates a fresh network namespace for each profile,
+enables only its loopback device, applies `tc netem` there, runs the stable chaos
+workload, captures results, and deletes the namespace. It never attaches a qdisc
+to the default namespace or a host interface.
+
+## Three different failure models
+
+These terms are not interchangeable:
+
+| Model | Implementation | What happens |
+| --- | --- | --- |
+| Network partition | Phase 14 directed proxy | Existing streams close and traffic is refused until an explicit heal. |
+| Connection reset | Phase 14 seeded proxy (`set_loss` in old timelines) | An application chunk is discarded and that TCP stream closes. It is deterministic and replayable. |
+| Packet impairment | Phase 15 kernel `tc netem` | IP packets are delayed, reordered, or dropped. TCP may retransmit, so a dropped packet need not fail a request. |
+
+Netem configuration and the workload seed are reproducible. Exact packet drops,
+TCP retransmission timing, process scheduling, and election timing are not
+bit-for-bit deterministic.
+
+## Build and run
+
+Install the Linux networking tools in addition to the normal prerequisites:
+
+```bash
+sudo apt-get install -y iproute2
+./scripts/build.sh release
+```
+
+On native Linux, run the complete required matrix as root:
+
+```bash
+sudo ./build/release/chaos/forgekv-netem \
+  --chaos ./build/release/chaos/forgekv-chaos \
+  --server ./build/release/src/forgekv-server \
+  --artifacts ./build/phase15-netem \
+  --nodes 3 --clients 8 --duration 10 --seed 150015
+```
+
+From Windows PowerShell with WSL, use WSL's explicit root user. Convert the
+repository path to its `/mnt/c/...` form:
+
+```powershell
+wsl -d Ubuntu -u root -- /mnt/c/path/to/forgekv/build/release/chaos/forgekv-netem `
+  --chaos /mnt/c/path/to/forgekv/build/release/chaos/forgekv-chaos `
+  --server /mnt/c/path/to/forgekv/build/release/src/forgekv-server `
+  --artifacts /mnt/c/path/to/forgekv/build/phase15-netem `
+  --nodes 3 --clients 8 --duration 10 --seed 150015
+```
+
+The output directory must be absent or empty. `/`, the current repository root,
+a home directory, a symlink, a missing executable, an unknown profile, duplicate
+options, and non-root execution are rejected before any namespace is created.
+
+The default matrix contains `baseline`, `latency-10ms`, `latency-50ms`,
+`latency-100ms`, `loss-0.1pct`, `loss-1pct`, and `loss-5pct`. Select one or more
+profiles with repeatable `--profile NAME`. `jitter-smoke` and `reorder-smoke`
+exercise the additional kernel behaviors.
+
+## Safety and cleanup
+
+Namespace names are generated internally as `fkv-netem-<pid>-<index>` and
+validated before use. Commands use direct argument arrays, not shell evaluation.
+The only accepted qdisc device is `lo`, always reached through
+`ip netns exec <owned-name>`. Namespace creation and deletion are bounded but do
+not honor the stop flag mid-operation; this deliberate exception closes the race
+where SIGTERM could otherwise prevent cleanup. The workload does honor INT/TERM,
+terminates its process group, and then runs the bounded namespace deletion.
+
+After an interrupted or failed run, verify cleanup with:
+
+```bash
+ip netns list | grep fkv-netem-
+```
+
+No output is expected. A deletion failure is reported as an experiment failure
+and retained in the evidence.
+
+## Evidence
+
+The output root contains:
+
+- `environment.txt`: kernel and iproute2 versions, exact argv, and semantic label;
+- `results.jsonl`: one bounded machine-readable record per completed profile;
+- `summary.md`: attempts/second, acknowledged mutations/second, observed qdisc
+  drops, convergence, and restart verification;
+- `<profile>/`: full chaos artifacts, workload output, and raw qdisc statistics.
+
+Every profile gets fresh storage and a fresh namespace. A passing profile means
+the real cluster accepted concurrent traffic, reached one consistent state,
+survived a complete process restart, and returned the exact acknowledged client
+state under that configured impairment. This quick matrix is behavioral
+evidence, not a statistically controlled performance benchmark; Phase 16 owns
+warm-up, repeated trials, variance, and saturation methodology.
+
+## Limits
+
+The first implementation shapes all loopback traffic in the isolated namespace,
+including client, admin, proxy, and Raft connections. It does not yet separate
+traffic classes or apply asymmetric per-peer kernel rules. It also does not model
+bandwidth limits, duplication, corruption, MTU faults, or physical NIC queues.
+Those additions require evidence that their complexity answers a real question.
+
+### Initial smoke evidence
+
+The development WSL2 host completed a real 3-node, 2-client, one-second stable
+workload under 1% kernel packet loss. Netem observed 6,154 packets and 61 drops;
+ForgeKV completed 22 attempts and 7 acknowledged mutations, converged, verified
+the durable restart, and left no namespace behind. The short run proves the path
+is genuine and wired end to end; it is not a throughput claim.
