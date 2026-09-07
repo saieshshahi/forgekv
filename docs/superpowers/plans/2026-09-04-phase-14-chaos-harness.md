@@ -37,7 +37,7 @@
 - Modify: `chaos/CMakeLists.txt`
 - Modify: `tests/CMakeLists.txt`
 
-- [ ] **Step 1: Write failing scheduler tests**
+- [x] **Step 1: Write failing scheduler tests**
 
 Define tests that require the same seed and cluster state to produce identical
 actions, different seeds to diverge, inapplicable actions to become explicit
@@ -64,7 +64,7 @@ TEST(ChaosSchedulerTest, RestartWithoutDeadNodeBecomesRecordedNoOp) {
 }
 ```
 
-- [ ] **Step 2: Run the new test and confirm it fails to compile**
+- [x] **Step 2: Run the new test and confirm it fails to compile**
 
 Run:
 
@@ -74,7 +74,7 @@ cmake --build build/debug --target forgekv_unit_tests -j2
 
 Expected: failure because `chaos/scheduler.h` and its types do not exist.
 
-- [ ] **Step 3: Implement the minimal stable scheduler**
+- [x] **Step 3: Implement the minimal stable scheduler**
 
 Use fixed-width fields and an explicitly implemented xorshift64* generator,
 not `std::uniform_*`, so library changes cannot alter the sequence:
@@ -101,7 +101,7 @@ and action intervals in `[50, 60'000]` milliseconds. `normalize()` must never
 select a dead leader, restart a live node, pause a dead node, or resume a node
 that is not paused.
 
-- [ ] **Step 4: Run scheduler tests**
+- [x] **Step 4: Run scheduler tests**
 
 Run:
 
@@ -120,7 +120,7 @@ Expected: all scheduler tests pass with a stable golden prefix for seed 12345.
 - Modify: `chaos/CMakeLists.txt`
 - Modify: `tests/CMakeLists.txt`
 
-- [ ] **Step 1: Write failing artifact tests**
+- [x] **Step 1: Write failing artifact tests**
 
 Require JSON escaping, append-only operation/timeline records, strict replay
 parsing, and atomic final files:
@@ -144,11 +144,11 @@ TEST(ChaosArtifactsTest, RejectsTruncatedUnknownAndOversizedReplay) {
 }
 ```
 
-- [ ] **Step 2: Run the tests and verify the missing API failure**
+- [x] **Step 2: Run the tests and verify the missing API failure**
 
 Run the unit target and expect compilation to fail on `ArtifactWriter`.
 
-- [ ] **Step 3: Implement bounded append and atomic publication**
+- [x] **Step 3: Implement bounded append and atomic publication**
 
 Open JSONL files with `O_APPEND | O_CREAT | O_CLOEXEC`. Count records and bytes
 before every write. Encode one record into a bounded local string and use a
@@ -157,7 +157,7 @@ writing `<name>.tmp`, calling `fdatasync`, renaming, and syncing the artifact
 directory. The replay parser accepts only fields emitted by this version and
 rejects duplicate fields, overflow, truncation, and trailing content.
 
-- [ ] **Step 4: Run artifact tests and inspect a golden artifact directory**
+- [x] **Step 4: Run artifact tests and inspect a golden artifact directory**
 
 Expected: tests pass; every JSONL line is independently parseable and
 `replay.txt` contains `forgekv-chaos --replay=<absolute timeline path>` plus the
@@ -172,7 +172,7 @@ recorded cluster/client options.
 - Modify: `chaos/CMakeLists.txt`
 - Modify: `tests/CMakeLists.txt`
 
-- [ ] **Step 1: Write failing real-socket proxy tests**
+- [x] **Step 1: Write failing real-socket proxy tests**
 
 Use a loopback echo server behind one proxy and verify healthy forwarding,
 prompt partition close, fixed delay bounds, stable seeded loss decisions,
@@ -194,11 +194,11 @@ TEST(FaultProxyTest, PartitionClosesExistingStreamAndHealReconnects) {
 }
 ```
 
-- [ ] **Step 2: Run the integration target and confirm the proxy API is missing**
+- [x] **Step 2: Run the integration target and confirm the proxy API is missing**
 
 Expected: compilation fails before any production code is added.
 
-- [ ] **Step 3: Implement one joinable poll-based proxy owner**
+- [x] **Step 3: Implement one joinable poll-based proxy owner**
 
 The proxy owns listener, wake descriptor, accepted upstream, downstream, and a
 min-heap of delayed chunks. Cap active streams at one and queued bytes at 4 MiB
@@ -207,7 +207,7 @@ owned only by the proxy thread. A dropped chunk closes both ends. Partition
 changes wake the owner and close both ends. Stop wakes, joins, then closes all
 descriptors; no thread is detached.
 
-- [ ] **Step 4: Run the proxy tests repeatedly**
+- [x] **Step 4: Run the proxy tests repeatedly**
 
 Run:
 
@@ -227,7 +227,7 @@ Expected: every iteration passes without leaked descriptors.
 - Modify: `chaos/CMakeLists.txt`
 - Modify: `tests/CMakeLists.txt`
 
-- [ ] **Step 1: Write failing lifecycle tests**
+- [x] **Step 1: Write failing lifecycle tests**
 
 Require unique ports, source-specific proxy peer arguments, start/kill/restart,
 STOP/CONT, nonblocking status refresh, TERM with KILL fallback, and destructor
@@ -243,11 +243,11 @@ TEST(ProcessClusterTest, BuildsDirectedProxyTopologyForEverySource) {
 }
 ```
 
-- [ ] **Step 2: Verify tests fail for the missing lifecycle component**
+- [x] **Step 2: Verify tests fail for the missing lifecycle component**
 
 Build the unit target; expected failure names `ProcessCluster`.
 
-- [ ] **Step 3: Implement strict ownership and signal methods**
+- [x] **Step 3: Implement strict ownership and signal methods**
 
 Adapt the proven `ServerProcess` logic from
 `tests/integration/real_cluster_test.cpp`, but keep PID state in one owner and
@@ -257,7 +257,7 @@ directed proxy ports, redirect stdout/stderr to `logs/node-N.log`, and exec the
 configured absolute server path. All wait loops use deadlines and handle
 `EINTR`; children are always reaped.
 
-- [ ] **Step 4: Run lifecycle tests including repeated destruction**
+- [x] **Step 4: Run lifecycle tests including repeated destruction**
 
 Expected: 50 repeated prepare/start/stop cycles leave no live child PIDs.
 
@@ -270,7 +270,7 @@ Expected: 50 repeated prepare/start/stop cycles leave no live child PIDs.
 - Modify: `chaos/CMakeLists.txt`
 - Modify: `tests/CMakeLists.txt`
 
-- [ ] **Step 1: Write failing state and response tests**
+- [x] **Step 1: Write failing state and response tests**
 
 Cover request encoding, redirect endpoint validation, timeout ambiguity,
 same-ID retry, definitive duplicate results, GET validation, and final expected
@@ -288,9 +288,9 @@ TEST(ChaosClientStateTest, TimeoutRetriesSameIdBeforeNextOperation) {
 }
 ```
 
-- [ ] **Step 2: Confirm missing client state fails compilation**
+- [x] **Step 2: Confirm missing client state fails compilation**
 
-- [ ] **Step 3: Implement the pure state model, then socket execution**
+- [x] **Step 3: Implement the pure state model, then socket execution**
 
 Encode client IDs and lengths exactly as `cluster/codecs.cpp` expects. Use one
 request per connection initially for simple failure boundaries. Apply 1-second
@@ -299,7 +299,7 @@ well-formed loopback redirects, and classify OK/not-found/error as definitive;
 transport failure and timeout are ambiguous. Append every physical attempt to
 the artifact sink before deciding the next attempt.
 
-- [ ] **Step 4: Run state tests and a fake-endpoint retry test**
+- [x] **Step 4: Run state tests and a fake-endpoint retry test**
 
 Expected: a dropped first response produces two attempts with one logical
 request ID and exactly one expected-state transition.
@@ -313,7 +313,7 @@ request ID and exactly one expected-state transition.
 - Modify: `chaos/CMakeLists.txt`
 - Modify: `tests/CMakeLists.txt`
 
-- [ ] **Step 1: Write failing parser and convergence tests**
+- [x] **Step 1: Write failing parser and convergence tests**
 
 Provide golden `/health`, `/ready`, and `/metrics` responses. Reject duplicate,
 missing, malformed, negative, NaN, and unknown-role samples. Require one ready
@@ -329,16 +329,16 @@ TEST(ChaosVerifierTest, ConvergedRequiresOneLeaderAndEqualAppliedIndexes) {
 }
 ```
 
-- [ ] **Step 2: Verify the tests fail on the absent verifier**
+- [x] **Step 2: Verify the tests fail on the absent verifier**
 
-- [ ] **Step 3: Implement bounded HTTP fetch and strict metric extraction**
+- [x] **Step 3: Implement bounded HTTP fetch and strict metric extraction**
 
 Read at most 4 MiB per response. Parse HTTP status and the exact fixed metric
 names emitted by Phase 13. Poll until a configured deadline with 100 ms
 intervals. After convergence, issue a linearizable GET for every client-owned
 key and compare OK/not-found and bytes to `ClientState`.
 
-- [ ] **Step 4: Run verifier unit tests**
+- [x] **Step 4: Run verifier unit tests**
 
 Expected: all malformed metrics fail closed with a diagnostic naming the node
 and sample.
@@ -352,7 +352,7 @@ and sample.
 - Modify: `chaos/CMakeLists.txt`
 - Modify: `tests/CMakeLists.txt`
 
-- [ ] **Step 1: Write failing short end-to-end tests**
+- [x] **Step 1: Write failing short end-to-end tests**
 
 Add scripted tests for follower kill/restart, leader-majority partition,
 pause/resume plus delay/loss, all-node restart, convergence, exact keys, and
@@ -372,9 +372,9 @@ TEST(ChaosHarnessTest, ScriptedFailoverRestartsAndVerifiesAcknowledgedState) {
 }
 ```
 
-- [ ] **Step 2: Run the test and verify the missing orchestrator failure**
+- [x] **Step 2: Run the test and verify the missing orchestrator failure**
 
-- [ ] **Step 3: Implement the bounded run state machine**
+- [x] **Step 3: Implement the bounded run state machine**
 
 Use explicit phases `prepare`, `start`, `warmup`, `chaos`, `resolve`,
 `durable_restart`, `converge`, `verify`, `collect`, and `cleanup`. Apply actions
@@ -383,7 +383,7 @@ when an action normalizes to no-op. Stop clients before resolve. Heal and resume
 first, restart dead nodes, resolve each outstanding logical request, then stop
 and restart all nodes once before convergence and key checks.
 
-- [ ] **Step 4: Run scripted integration tests repeatedly**
+- [x] **Step 4: Run scripted integration tests repeatedly**
 
 Expected: 10/10 passes; injected verification failure retains all required
 artifacts and reports a usable replay command.
@@ -397,20 +397,20 @@ artifacts and reports a usable replay command.
 - Modify: `CMakeLists.txt`
 - Modify: `README.md`
 
-- [ ] **Step 1: Write failing CLI smoke tests in CMake**
+- [x] **Step 1: Write failing CLI smoke tests in CMake**
 
 Register `ChaosCliHelp`, `ChaosCliRejectsInvalidBounds`, and a short seeded
 smoke run. Invalid values must exit 2; invariant/run failures exit 1; success
 exits 0.
 
-- [ ] **Step 2: Implement strict CLI parsing**
+- [x] **Step 2: Implement strict CLI parsing**
 
 Accept `--nodes`, `--clients`, `--duration`, `--seed`, `--server`,
 `--artifacts`, `--action-interval-ms`, `--keep-success`, and `--replay` in both
 `--name value` and `--name=value` forms. Reject duplicates and incompatible
 `--seed`/`--replay`. Print the seed and artifact directory before launching.
 
-- [ ] **Step 3: Document exact usage and claims**
+- [x] **Step 3: Document exact usage and claims**
 
 Document every action, bound, artifact, exit code, final invariant, and replay
 limitation. Include:
@@ -426,7 +426,7 @@ State explicitly that seeded decisions and realized timelines are reproducible
 but OS scheduling is not, and that finite campaigns do not establish production
 readiness.
 
-- [ ] **Step 4: Run CLI and documentation checks**
+- [x] **Step 4: Run CLI and documentation checks**
 
 Expected: help succeeds, invalid bounds fail before creating children, and a
 short seeded run prints `result=pass converged=true restart_verified=true`.
@@ -436,7 +436,7 @@ short seeded run prints `result=pass converged=true restart_verified=true`.
 **Files:**
 - Modify: `docs/superpowers/plans/2026-09-04-phase-14-chaos-harness.md` (check completed steps)
 
-- [ ] **Step 1: Run focused and repeated chaos tests**
+- [x] **Step 1: Run focused and repeated chaos tests**
 
 ```bash
 build/debug/tests/forgekv_unit_tests --gtest_filter='Chaos*'
@@ -447,14 +447,14 @@ build/debug/tests/forgekv_integration_tests \
 
 Expected: all pass.
 
-- [ ] **Step 2: Run seeded end-to-end campaigns**
+- [x] **Step 2: Run seeded end-to-end campaigns**
 
 Run at least seeds `1`, `12345`, `0xC0FFEE`, `0xDEADBEEF`, and
 `0x9E3779B97F4A7C15`, using 3 nodes/8 clients/10 seconds. Run one 5-node/32
 client/30-second campaign. Every campaign must converge, restart, and validate
 acknowledged state; preserve summaries as Phase 14 evidence.
 
-- [ ] **Step 3: Run complete build matrix**
+- [x] **Step 3: Run complete build matrix**
 
 ```bash
 ctest --test-dir build/debug --output-on-failure -j2
@@ -469,13 +469,13 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 Expected: debug, release, ASan, and UBSan pass. TSan passes or its documented
 runtime/platform limitation is captured with the exact diagnostic.
 
-- [ ] **Step 4: Request specification and quality review**
+- [x] **Step 4: Request specification and quality review**
 
 Reviewers must trace every Phase 14 requirement to source/tests/artifacts and
 rank remaining findings. Fix all P0/P1 and justified measured P2 findings, then
 rerun affected and full verification.
 
-- [ ] **Step 5: Commit and push Phase 14**
+- [x] **Step 5: Commit and push Phase 14**
 
 ```bash
 git add CMakeLists.txt README.md chaos docs tests
@@ -485,3 +485,18 @@ git push origin main
 
 Expected: local `HEAD` equals `origin/main`, the worktree is clean, and the
 final commit contains implementation, tests, documentation, and checked plan.
+
+## Completion evidence
+
+- Focused final review: 43/43 chaos tests passed; independent specification and
+  quality reviews both returned GO with no P0/P1 findings.
+- Full matrices: debug 233/233, release 233/233, ASan 233/233, UBSan 233/233,
+  and Clang TSan 233/233 passed.
+- Final 3-node, 8-client, 10-second release campaigns passed for seeds `1`,
+  `12345`, `0xC0FFEE`, `0xDEADBEEF`, and `0x9E3779B97F4A7C15`.
+- The final 5-node, 32-client, 30-second release campaign passed with 2,681
+  physical attempts and 841 acknowledged mutations, then converged and passed
+  a complete durable restart.
+- A non-default-seed replay restored seed `12345`, campaign shape, client IDs,
+  cluster ID, proxy decisions, and the realized action timeline; the actual CLI
+  SIGTERM and compact-success retention paths also passed end to end.

@@ -140,7 +140,7 @@ Runs use an isolated directory containing:
 ```text
 config.json
 seed.txt
-operations.jsonl
+history.jsonl
 timeline.jsonl
 summary.json
 replay.txt

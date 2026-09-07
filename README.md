@@ -4,6 +4,10 @@ ForgeKV is a Linux-first replicated key-value store built in staged, testable
 increments. The current repository begins with the engineering harness; the
 architecture and correctness contracts live in [`docs/`](docs/).
 
+The repository also includes a real multi-process, seeded chaos harness. See
+[deterministic chaos testing](docs/chaos-testing.md) for campaigns, retained
+artifacts, exact acknowledged-state verification, and replay.
+
 ## Prerequisites
 
 On Ubuntu 22.04 or newer:

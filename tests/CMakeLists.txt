@@ -2,6 +2,11 @@ include(GoogleTest)
 
 add_executable(forgekv_unit_tests
   unit/cluster_codecs_test.cpp
+  unit/chaos_client_state_test.cpp
+  unit/chaos_process_cluster_test.cpp
+  unit/chaos_scheduler_test.cpp
+  unit/chaos_verifier_test.cpp
+  unit/chaos_artifacts_test.cpp
   unit/checksum_test.cpp
   unit/logging_test.cpp
   unit/kv_store_test.cpp
@@ -25,6 +30,7 @@ add_executable(forgekv_unit_tests
 target_link_libraries(forgekv_unit_tests PRIVATE
   forgekv_common
   forgekv_cluster
+  forgekv_chaos_core
   forgekv_net
   forgekv_protocol
   forgekv_raft
@@ -32,16 +38,24 @@ target_link_libraries(forgekv_unit_tests PRIVATE
   forgekv_storage
   GTest::gtest_main
 )
+target_include_directories(forgekv_unit_tests PRIVATE ${PROJECT_SOURCE_DIR})
+target_compile_definitions(forgekv_unit_tests PRIVATE
+  FORGEKV_SERVER_PATH="$<TARGET_FILE:forgekv_server>"
+)
+add_dependencies(forgekv_unit_tests forgekv_server)
 
 gtest_discover_tests(forgekv_unit_tests DISCOVERY_MODE PRE_TEST)
 
 add_executable(forgekv_integration_tests
   integration/admin_server_test.cpp
+  integration/chaos_harness_test.cpp
+  integration/fault_proxy_test.cpp
   integration/real_cluster_test.cpp
   integration/storage_recovery_test.cpp
   integration/tcp_server_test.cpp
 )
 target_link_libraries(forgekv_integration_tests PRIVATE
+  forgekv_chaos_core
   forgekv_cluster
   forgekv_net
   forgekv_storage
@@ -49,8 +63,9 @@ target_link_libraries(forgekv_integration_tests PRIVATE
 )
 target_compile_definitions(forgekv_integration_tests PRIVATE
   FORGEKV_SERVER_PATH="$<TARGET_FILE:forgekv_server>"
+  FORGEKV_CHAOS_PATH="$<TARGET_FILE:forgekv_chaos>"
 )
-add_dependencies(forgekv_integration_tests forgekv_server)
+add_dependencies(forgekv_integration_tests forgekv_server forgekv_chaos)
 
 gtest_discover_tests(forgekv_integration_tests DISCOVERY_MODE PRE_TEST)
 
