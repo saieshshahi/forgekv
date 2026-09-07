@@ -74,6 +74,10 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
       .maximum_output_bytes = 64U * 1024U,
       .interrupted = options.interrupted,
   };
+  const CommandOptions lifecycle_options{
+      .timeout = std::chrono::seconds(10),
+      .maximum_output_bytes = 64U * 1024U,
+  };
   for (std::size_t index = 0U; index < options.profiles.size(); ++index) {
     NetemProfileResult profile_result;
     profile_result.profile = options.profiles[index];
@@ -99,7 +103,7 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
       }
       owns_namespace = false;
       return executor_.run({"ip", "netns", "del", namespace_name},
-                           setup_options);
+                           lifecycle_options);
     };
     const auto fail = [&](const std::string& diagnostic) {
       profile_result.error = diagnostic;
@@ -113,7 +117,7 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
     };
 
     const auto created = executor_.run(
-        {"ip", "netns", "add", namespace_name}, setup_options);
+        {"ip", "netns", "add", namespace_name}, lifecycle_options);
     if (!created.ok()) {
       fail(command_failure("namespace create", created));
       return matrix;
@@ -173,6 +177,7 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
                        {"tc", "-s", "qdisc", "show", "dev", "lo"}),
           setup_options);
       const auto stats = parse_qdisc_stats(stats_result.output);
+      profile_result.qdisc_output = stats_result.output;
       if (!stats_result.ok() || !stats.ok()) {
         fail(command_failure("collect qdisc statistics", stats_result) +
              (stats.ok() ? "" : "; " + stats.error));

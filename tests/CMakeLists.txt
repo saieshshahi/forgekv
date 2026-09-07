@@ -52,6 +52,7 @@ add_executable(forgekv_integration_tests
   integration/admin_server_test.cpp
   integration/chaos_harness_test.cpp
   integration/fault_proxy_test.cpp
+  integration/netem_runner_test.cpp
   integration/real_cluster_test.cpp
   integration/storage_recovery_test.cpp
   integration/tcp_server_test.cpp
@@ -66,8 +67,9 @@ target_link_libraries(forgekv_integration_tests PRIVATE
 target_compile_definitions(forgekv_integration_tests PRIVATE
   FORGEKV_SERVER_PATH="$<TARGET_FILE:forgekv_server>"
   FORGEKV_CHAOS_PATH="$<TARGET_FILE:forgekv_chaos>"
+  FORGEKV_NETEM_PATH="$<TARGET_FILE:forgekv_netem>"
 )
-add_dependencies(forgekv_integration_tests forgekv_server forgekv_chaos)
+add_dependencies(forgekv_integration_tests forgekv_server forgekv_chaos forgekv_netem)
 
 gtest_discover_tests(forgekv_integration_tests DISCOVERY_MODE PRE_TEST)
 

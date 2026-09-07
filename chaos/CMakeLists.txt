@@ -44,3 +44,12 @@ set_tests_properties(ChaosCliSeededSmoke PROPERTIES
   TIMEOUT 60
 )
 add_dependencies(forgekv_chaos forgekv_server)
+
+add_executable(forgekv_netem netem_main.cpp)
+set_target_properties(forgekv_netem PROPERTIES OUTPUT_NAME forgekv-netem)
+target_link_libraries(forgekv_netem PRIVATE forgekv_chaos_core)
+add_dependencies(forgekv_netem forgekv_chaos forgekv_server)
+
+add_test(NAME NetemCliHelp COMMAND forgekv_netem --help)
+add_test(NAME NetemCliRejectsInvalidBounds COMMAND forgekv_netem --nodes 4)
+set_tests_properties(NetemCliRejectsInvalidBounds PROPERTIES WILL_FAIL TRUE)

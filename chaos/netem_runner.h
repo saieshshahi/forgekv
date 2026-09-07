@@ -33,6 +33,7 @@ struct NetemProfileResult final {
   std::chrono::milliseconds wall_duration{};
   int workload_exit_code{-1};
   std::string workload_output;
+  std::string qdisc_output;
   std::string error;
   [[nodiscard]] bool ok() const noexcept {
     return error.empty() && workload_exit_code == 0 && summary.passed;
