@@ -449,12 +449,28 @@ CampaignConfigResult read_campaign_config(const std::filesystem::path& path) {
       !consume_u64(text, config.duration_ms) ||
       !consume(text, ",\"action_interval_ms\":") ||
       !consume_u64(text, config.action_interval_ms) ||
-      !consume(text, ",\"seed\":") || !consume_u64(text, config.seed) ||
-      !consume(text, "}\n") || !text.empty() ||
+      !consume(text, ",\"seed\":") || !consume_u64(text, config.seed)) {
+    return {.error = "invalid campaign config"};
+  }
+  if (consume(text, ",\"chaos_enabled\":")) {
+    if (consume(text, "true")) {
+      config.chaos_enabled = true;
+    } else if (consume(text, "false")) {
+      config.chaos_enabled = false;
+    } else {
+      return {.error = "invalid campaign config"};
+    }
+    if (!consume(text, ",\"request_timeout_ms\":") ||
+        !consume_u64(text, config.request_timeout_ms)) {
+      return {.error = "invalid campaign config"};
+    }
+  }
+  if (!consume(text, "}\n") || !text.empty() ||
       (nodes != 3U && nodes != 5U) || clients == 0U || clients > 256U ||
       config.duration_ms < 1000U || config.duration_ms > 3'600'000U ||
       config.action_interval_ms < 50U ||
-      config.action_interval_ms > 60'000U) {
+      config.action_interval_ms > 60'000U || config.request_timeout_ms < 50U ||
+      config.request_timeout_ms > 10'000U) {
     return {.error = "invalid campaign config"};
   }
   config.nodes = static_cast<std::size_t>(nodes);

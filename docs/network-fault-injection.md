@@ -103,10 +103,33 @@ traffic classes or apply asymmetric per-peer kernel rules. It also does not mode
 bandwidth limits, duplication, corruption, MTU faults, or physical NIC queues.
 Those additions require evidence that their complexity answers a real question.
 
-### Initial smoke evidence
+## Phase 15 measured evidence
 
-The development WSL2 host completed a real 3-node, 2-client, one-second stable
-workload under 1% kernel packet loss. Netem observed 6,154 packets and 61 drops;
-ForgeKV completed 22 attempts and 7 acknowledged mutations, converged, verified
-the durable restart, and left no namespace behind. The short run proves the path
-is genuine and wired end to end; it is not a throughput claim.
+The development WSL2 host ran the optimized 3-node, 8-client matrix for three
+seconds of traffic per profile with seed 150015. Every profile scheduled zero
+Phase 14 actions, converged, matched the exact acknowledged client state after a
+complete restart, removed its namespace, and left default-namespace loopback at
+`noqueue`.
+
+| Profile | Attempts/s | Ack mutations/s | Netem packets | Netem drops |
+| --- | ---: | ---: | ---: | ---: |
+| baseline | 97 | 70 | 0 | 0 |
+| latency-10ms | 58 | 42 | 4,862 | 0 |
+| latency-50ms | 20 | 4 | 3,452 | 0 |
+| latency-100ms | 15 | 2 | 4,245 | 0 |
+| loss-0.1pct | 108 | 79 | 18,082 | 20 |
+| loss-1pct | 56 | 40 | 7,294 | 79 |
+| loss-5pct | 29 | 20 | 3,769 | 189 |
+
+The non-monotonic 0.1% throughput result illustrates why this is not a benchmark:
+each profile is one short trial with no warm-up or variance estimate. Phase 16
+will correct that methodology. The meaningful Phase 15 evidence is that the
+kernel installed each profile, observed the expected order of loss, and ForgeKV
+preserved the checked guarantees.
+
+Separate two-second, 3-node, 4-client smoke runs with seed 150016 verified the
+additional behaviors. The kernel reported `delay 10ms 5ms` for `jitter-smoke`
+and `delay 10ms reorder 1% 25%` for `reorder-smoke`; both converged and verified
+durable restart. The permanent privileged integration test covers both the
+100 ms and 5% endpoints, and a second test sends SIGTERM only after live server
+children exist and verifies the owned namespace is removed.

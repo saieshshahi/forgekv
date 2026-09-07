@@ -28,6 +28,18 @@ std::vector<std::string> in_namespace(const std::string& name,
   return result;
 }
 
+std::uint64_t request_timeout_ms(const NetemProfile& profile) {
+  const auto network_delay_ms =
+      (static_cast<std::uint64_t>(profile.delay_us) + profile.jitter_us + 999U) /
+      1000U;
+  auto timeout = std::max<std::uint64_t>(250U, 250U + 8U * network_delay_ms);
+  if (profile.loss_basis_points != 0U ||
+      profile.reorder_basis_points != 0U) {
+    timeout = std::max<std::uint64_t>(timeout, 2'000U);
+  }
+  return std::min<std::uint64_t>(timeout, 10'000U);
+}
+
 }  // namespace
 
 bool valid_netem_namespace_name(const std::string_view name) {
@@ -77,6 +89,7 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
   const CommandOptions lifecycle_options{
       .timeout = std::chrono::seconds(10),
       .maximum_output_bytes = 64U * 1024U,
+      .interrupted = {},
   };
   for (std::size_t index = 0U; index < options.profiles.size(); ++index) {
     NetemProfileResult profile_result;
@@ -113,14 +126,15 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
                                                         cleaned);
       }
       matrix.profiles.push_back(std::move(profile_result));
-      matrix.error = matrix.profiles.back().error;
+      if (matrix.error.empty()) matrix.error = matrix.profiles.back().error;
     };
 
     const auto created = executor_.run(
         {"ip", "netns", "add", namespace_name}, lifecycle_options);
     if (!created.ok()) {
       fail(command_failure("namespace create", created));
-      return matrix;
+      if (options.interrupted && options.interrupted()) return matrix;
+      continue;
     }
     owns_namespace = true;
     const auto loopback = executor_.run(
@@ -128,14 +142,16 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
         setup_options);
     if (!loopback.ok()) {
       fail(command_failure("enable isolated loopback", loopback));
-      return matrix;
+      if (options.interrupted && options.interrupted()) return matrix;
+      continue;
     }
     if (!netem.arguments.empty()) {
       const auto applied = executor_.run(
           in_namespace(namespace_name, netem.arguments), setup_options);
       if (!applied.ok()) {
         fail(command_failure("apply netem profile", applied));
-        return matrix;
+        if (options.interrupted && options.interrupted()) return matrix;
+        continue;
       }
     }
 
@@ -144,6 +160,8 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
         "--nodes", std::to_string(options.nodes),
         "--clients", std::to_string(options.clients),
         "--duration", std::to_string(options.duration.count()),
+        "--request-timeout-ms",
+        std::to_string(request_timeout_ms(profile_result.profile)),
         "--seed", std::to_string(options.seed),
         "--server", options.server_path.string(),
         "--artifacts",
@@ -167,7 +185,8 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
     if (!summary.ok()) {
       fail(command_failure("stable ForgeKV workload", workload_result) +
            "; " + summary.error);
-      return matrix;
+      if (options.interrupted && options.interrupted()) return matrix;
+      continue;
     }
     profile_result.summary = *summary.summary;
 
@@ -181,7 +200,8 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
       if (!stats_result.ok() || !stats.ok()) {
         fail(command_failure("collect qdisc statistics", stats_result) +
              (stats.ok() ? "" : "; " + stats.error));
-        return matrix;
+        if (options.interrupted && options.interrupted()) return matrix;
+        continue;
       }
       profile_result.qdisc = *stats.stats;
     }
@@ -195,8 +215,7 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
     }
     matrix.profiles.push_back(std::move(profile_result));
     if (!matrix.profiles.back().ok()) {
-      matrix.error = matrix.profiles.back().error;
-      return matrix;
+      if (matrix.error.empty()) matrix.error = matrix.profiles.back().error;
     }
   }
   return matrix;

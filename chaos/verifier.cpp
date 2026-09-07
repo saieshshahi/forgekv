@@ -330,7 +330,11 @@ AdminTextResult fetch_admin_text(const NodeAdminEndpoint endpoint,
 ConvergenceResult wait_for_convergence(
     const std::vector<NodeAdminEndpoint>& endpoints,
     const std::chrono::steady_clock::time_point deadline,
-    const std::function<bool()> interrupted) {
+    const std::function<bool()> interrupted,
+    const std::chrono::milliseconds maximum_request_timeout) {
+  if (maximum_request_timeout.count() <= 0) {
+    return {.error = "invalid convergence request timeout"};
+  }
   std::string last_error = "convergence deadline expired";
   while (std::chrono::steady_clock::now() < deadline) {
     if (interrupted && interrupted()) {
@@ -351,7 +355,7 @@ ConvergenceResult wait_for_convergence(
           deadline - now);
       const auto request_timeout =
           std::max(std::chrono::milliseconds(1),
-                   std::min(std::chrono::milliseconds(250),
+                   std::min(maximum_request_timeout,
                             remaining / static_cast<std::int64_t>(
                                             endpoints.size() * 3U)));
       auto result = fetch_node_view(endpoint, request_timeout);

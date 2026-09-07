@@ -36,6 +36,8 @@ struct CampaignConfig final {
   std::uint64_t duration_ms{};
   std::uint64_t action_interval_ms{};
   std::uint64_t seed{};
+  bool chaos_enabled{true};
+  std::uint64_t request_timeout_ms{250U};
 };
 
 struct CampaignConfigResult final {

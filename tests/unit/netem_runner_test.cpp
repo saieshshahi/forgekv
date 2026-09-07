@@ -97,6 +97,8 @@ TEST(NetemRunnerTest, BaselineCreatesRunsAndDeletesWithoutQdisc) {
   EXPECT_EQ(executor.calls[2][4], "/opt/forgekv/forgekv-chaos");
   EXPECT_NE(std::ranges::find(executor.calls[2], "--no-chaos"),
             executor.calls[2].end());
+  EXPECT_NE(std::ranges::find(executor.calls[2], "--request-timeout-ms"),
+            executor.calls[2].end());
   EXPECT_EQ(executor.calls[3],
             (std::vector<std::string>{"ip", "netns", "del",
                                       "fkv-netem-42-0"}));
@@ -131,6 +133,11 @@ TEST(NetemRunnerTest, AppliesKernelProfileCollectsStatsThenDeletes) {
             (std::vector<std::string>{"ip", "netns", "exec",
                                       "fkv-netem-9-0", "tc", "-s", "qdisc",
                                       "show", "dev", "lo"}));
+  const auto timeout = std::ranges::find(executor.calls[3],
+                                         "--request-timeout-ms");
+  ASSERT_NE(timeout, executor.calls[3].end());
+  ASSERT_NE(timeout + 1, executor.calls[3].end());
+  EXPECT_EQ(*(timeout + 1), "2000");
   EXPECT_EQ(result.profiles.front().qdisc.packets, 10U);
   EXPECT_EQ(result.profiles.front().qdisc.dropped, 2U);
 }
@@ -160,6 +167,32 @@ TEST(NetemRunnerTest, SetupFailureDeletesOnlyAnOwnedNamespace) {
                                   NetemProfile{.name = "baseline"}))
                    .ok());
   ASSERT_EQ(add_failure.calls.size(), 1U);
+}
+
+TEST(NetemRunnerTest, FailedProfileIsRecordedAndLaterProfilesStillRun) {
+  FakeExecutor executor;
+  executor.results = {
+      CommandResult{.exit_code = 1, .output = "first create failed"},
+      CommandResult{.exit_code = 0},
+      CommandResult{.exit_code = 0},
+      CommandResult{
+          .exit_code = 0,
+          .output = "result=pass converged=true restart_verified=true "
+                    "attempts=20 acknowledged_writes=5 actions=0\n"},
+      CommandResult{.exit_code = 0},
+  };
+  auto run_options =
+      options("/tmp/forgekv-netem-test", NetemProfile{.name = "baseline"});
+  run_options.profiles.push_back(NetemProfile{.name = "baseline-two"});
+  NetemRunner runner(executor, 0U, 99U);
+  const auto result = runner.run(run_options);
+  EXPECT_FALSE(result.ok());
+  ASSERT_EQ(result.profiles.size(), 2U);
+  EXPECT_FALSE(result.profiles[0].ok());
+  EXPECT_TRUE(result.profiles[1].ok());
+  EXPECT_EQ(executor.calls.back(),
+            (std::vector<std::string>{"ip", "netns", "del",
+                                      "fkv-netem-99-1"}));
 }
 
 TEST(ProcessRunnerTest, CapturesOutputAndEnforcesTimeout) {

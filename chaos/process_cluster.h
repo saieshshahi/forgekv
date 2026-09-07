@@ -20,6 +20,7 @@ struct ProcessClusterConfig final {
   std::filesystem::path root_directory;
   std::chrono::milliseconds shutdown_grace{std::chrono::seconds(5)};
   std::uint64_t proxy_seed{1U};
+  bool enable_proxies{true};
 };
 
 struct ClusterStatus final {

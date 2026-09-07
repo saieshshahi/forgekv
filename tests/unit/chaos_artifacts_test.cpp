@@ -137,6 +137,21 @@ TEST(ChaosArtifactsTest, ReadsStrictCampaignConfigAndRejectsOversizedInput) {
   EXPECT_EQ(config.config->nodes, 5U);
   EXPECT_EQ(config.config->clients, 32U);
   EXPECT_EQ(config.config->seed, 12345U);
+  EXPECT_TRUE(config.config->chaos_enabled);
+  EXPECT_EQ(config.config->request_timeout_ms, 250U);
+
+  ASSERT_TRUE(writer.publish(
+                        "config-v2.json",
+                        "{\"version\":1,\"nodes\":3,\"clients\":8,"
+                        "\"duration_ms\":3000,\"action_interval_ms\":1000,"
+                        "\"seed\":150015,\"chaos_enabled\":false,"
+                        "\"request_timeout_ms\":1050}\n")
+                  .ok());
+  const auto extended =
+      read_campaign_config(directory.path() / "config-v2.json");
+  ASSERT_TRUE(extended.ok()) << extended.error;
+  EXPECT_FALSE(extended.config->chaos_enabled);
+  EXPECT_EQ(extended.config->request_timeout_ms, 1050U);
 
   std::filesystem::resize_file(directory.path() / "config.json", 4097U);
   EXPECT_FALSE(read_campaign_config(directory.path() / "config.json").ok());

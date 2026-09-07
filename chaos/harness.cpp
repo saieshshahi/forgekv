@@ -64,7 +64,9 @@ std::vector<NodeAdminEndpoint> admin_endpoints(ProcessCluster& cluster,
 }
 
 std::optional<std::uint64_t> observed_leader(ProcessCluster& cluster,
-                                             const std::size_t count) {
+                                             const std::size_t count,
+                                             const std::chrono::milliseconds timeout =
+                                                 std::chrono::milliseconds(100)) {
   for (std::size_t index = 0U; index < count; ++index) {
     const auto node = static_cast<std::uint64_t>(index + 1U);
     if (cluster.state(node) == NodeState::dead) {
@@ -72,7 +74,7 @@ std::optional<std::uint64_t> observed_leader(ProcessCluster& cluster,
     }
     const auto view = fetch_node_view(
         NodeAdminEndpoint{.node = node, .port = cluster.admin_port(node)},
-        std::chrono::milliseconds(100));
+        timeout);
     if (view.ok() && view.view->role == ObservedRole::leader) {
       return node;
     }
@@ -81,9 +83,10 @@ std::optional<std::uint64_t> observed_leader(ProcessCluster& cluster,
 }
 
 ClusterView current_cluster_view(ProcessCluster& cluster,
-                                 const std::size_t count) {
+                                 const std::size_t count,
+                                 const std::chrono::milliseconds timeout) {
   auto view = cluster.refresh();
-  view.leader = observed_leader(cluster, count);
+  view.leader = observed_leader(cluster, count, timeout);
   return view;
 }
 
@@ -108,6 +111,27 @@ std::string shell_quote(const std::string& value) {
   }
   result.push_back('\'');
   return result;
+}
+
+AdminTextResult fetch_admin_text_until(
+    const NodeAdminEndpoint endpoint, const std::string_view path,
+    const Clock::time_point deadline,
+    const std::chrono::milliseconds request_timeout,
+    const std::function<bool()>& interrupted) {
+  AdminTextResult last{.status = 0,
+                       .body = {},
+                       .error = "admin collection deadline expired"};
+  while (Clock::now() < deadline && !(interrupted && interrupted())) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - Clock::now());
+    last = fetch_admin_text(
+        endpoint, path,
+        std::max(std::chrono::milliseconds(1),
+                 std::min(request_timeout, remaining)));
+    if (last.ok()) return last;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return last;
 }
 
 ClusterStatus validate_artifact_bounds(const std::filesystem::path& root) {
@@ -300,6 +324,8 @@ ChaosHarness::ChaosHarness(HarnessOptions options)
       options_.action_interval < std::chrono::milliseconds(50) ||
       options_.server_path.empty() || options_.artifact_directory.empty() ||
       options_.overall_timeout <= options_.duration ||
+      options_.request_timeout < std::chrono::milliseconds(50) ||
+      options_.request_timeout > std::chrono::seconds(10) ||
       (!options_.enable_chaos && !options_.script.empty())) {
     throw std::invalid_argument("invalid chaos harness options");
   }
@@ -323,7 +349,9 @@ HarnessResult ChaosHarness::run() {
       ",\"action_interval_ms\":" +
       std::to_string(options_.action_interval.count()) + ",\"seed\":" +
       std::to_string(options_.seed) + ",\"chaos_enabled\":" +
-      (options_.enable_chaos ? "true" : "false") + "}\n";
+      (options_.enable_chaos ? "true" : "false") +
+      ",\"request_timeout_ms\":" +
+      std::to_string(options_.request_timeout.count()) + "}\n";
   if (const auto status = artifacts.publish("config.json", config_text);
       !status.ok()) {
     result.diagnostic = status.error;
@@ -359,7 +387,8 @@ HarnessResult ChaosHarness::run() {
         .cluster_id = options_.seed == 0U ? 1U : options_.seed,
         .server_path = options_.server_path,
         .root_directory = options_.artifact_directory,
-        .proxy_seed = options_.seed});
+        .proxy_seed = options_.seed,
+        .enable_proxies = options_.enable_chaos});
     if (const auto prepare_status = cluster.prepare(); !prepare_status.ok()) {
       result.diagnostic = prepare_status.error;
     } else if (const auto start_status = cluster.start_all();
@@ -380,7 +409,7 @@ HarnessResult ChaosHarness::run() {
       const auto initial = wait_for_convergence(
           admin_endpoints(cluster, options_.node_count),
           std::min(overall_deadline, Clock::now() + std::chrono::seconds(15)),
-          interrupted);
+          interrupted, options_.request_timeout);
       if (!initial.ok()) {
         result.diagnostic = "initial convergence: " + initial.error;
       } else {
@@ -432,7 +461,7 @@ HarnessResult ChaosHarness::run() {
                   const auto request = *state.next_attempt();
                   const auto start = elapsed_us(run_start);
                   const auto response = execute_attempt(
-                      endpoint, request, std::chrono::milliseconds(250));
+                      endpoint, request, options_.request_timeout);
                   const auto finish = elapsed_us(run_start);
                   attempts.fetch_add(1U, std::memory_order_relaxed);
                   const auto recorded = artifacts.append_attempt(AttemptRecord{
@@ -513,7 +542,8 @@ HarnessResult ChaosHarness::run() {
                       std::chrono::duration_cast<std::chrono::microseconds>(
                           next_action - chaos_start)
                           .count()),
-                  current_cluster_view(cluster, options_.node_count));
+                  current_cluster_view(cluster, options_.node_count,
+                                       options_.request_timeout));
               due = true;
               next_action += options_.action_interval;
             }
@@ -521,7 +551,8 @@ HarnessResult ChaosHarness::run() {
               std::this_thread::sleep_for(std::chrono::milliseconds(5));
               continue;
             }
-            auto view = current_cluster_view(cluster, options_.node_count);
+            auto view = current_cluster_view(cluster, options_.node_count,
+                                             options_.request_timeout);
             for (const auto& node : view.nodes) {
               if (node.state == NodeState::dead &&
                   !intentionally_dead.contains(node.id)) {
@@ -607,7 +638,7 @@ HarnessResult ChaosHarness::run() {
                 admin_endpoints(cluster, options_.node_count),
                 std::min(overall_deadline,
                          Clock::now() + std::chrono::seconds(15)),
-                interrupted);
+                interrupted, options_.request_timeout);
             if (!converged.ok()) {
               result.diagnostic = "post-chaos convergence: " + converged.error;
             }
@@ -627,7 +658,8 @@ HarnessResult ChaosHarness::run() {
                        Clock::now() < resolve_deadline) {
                   const auto request = *client.next_attempt();
                   const auto start = elapsed_us(run_start);
-                  const auto response = execute_attempt(endpoint, request);
+                  const auto response = execute_attempt(
+                      endpoint, request, options_.request_timeout);
                   const auto finish = elapsed_us(run_start);
                   ++result.summary.attempts;
                   const auto recorded = artifacts.append_attempt(AttemptRecord{
@@ -671,7 +703,7 @@ HarnessResult ChaosHarness::run() {
                 admin_endpoints(cluster, options_.node_count),
                 std::min(overall_deadline,
                          Clock::now() + std::chrono::seconds(15)),
-                interrupted);
+                interrupted, options_.request_timeout);
             if (!converged.ok()) {
               result.diagnostic = "resolved-state convergence: " +
                                   converged.error;
@@ -690,7 +722,7 @@ HarnessResult ChaosHarness::run() {
                 admin_endpoints(cluster, options_.node_count),
                 std::min(overall_deadline,
                          Clock::now() + std::chrono::seconds(20)),
-                interrupted);
+                interrupted, options_.request_timeout);
             if (!converged.ok()) {
               result.diagnostic = "restart convergence: " + converged.error;
             } else {
@@ -711,7 +743,8 @@ HarnessResult ChaosHarness::run() {
                              Clock::now() + std::chrono::seconds(5));
                 while (Clock::now() < verify_deadline) {
                   const auto start = elapsed_us(run_start);
-                  const auto response = execute_attempt(endpoint, request);
+                  const auto response = execute_attempt(
+                      endpoint, request, options_.request_timeout);
                   const auto finish = elapsed_us(run_start);
                   ++result.summary.attempts;
                   const auto recorded = artifacts.append_attempt(AttemptRecord{
@@ -756,8 +789,11 @@ HarnessResult ChaosHarness::run() {
       ArtifactWriter metrics(options_.artifact_directory / "metrics",
                              ArtifactLimits{});
       for (const auto endpoint : admin_endpoints(cluster, options_.node_count)) {
-        const auto snapshot = fetch_admin_text(
-            endpoint, "/metrics", std::chrono::milliseconds(500));
+        const auto snapshot = fetch_admin_text_until(
+            endpoint, "/metrics",
+            std::min(overall_deadline, Clock::now() + std::chrono::seconds(5)),
+            std::max(std::chrono::milliseconds(500), options_.request_timeout),
+            interrupted);
         if ((!snapshot.ok() || snapshot.status != 200) && result.ok()) {
           result.diagnostic = "metrics snapshot failed for node " +
                               std::to_string(endpoint.node) + ": " +

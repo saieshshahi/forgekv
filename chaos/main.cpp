@@ -30,6 +30,7 @@ void usage(std::ostream& output) {
       "  --clients 1..256                clients (default: 4)\n"
       "  --duration 1..3600              seconds (default: 10)\n"
       "  --action-interval-ms 50..60000  interval (default: 1000)\n"
+      "  --request-timeout-ms 50..10000  per-request test timeout\n"
       "  --seed UINT64                   decision seed\n"
       "  --artifacts PATH                output directory\n"
       "  --replay TIMELINE               replay realized actions\n"
@@ -76,6 +77,7 @@ Parsed parse(const int argc, char** argv) {
   bool interval_seen = false;
   bool seed_seen = false;
   bool no_chaos_seen = false;
+  bool request_timeout_seen = false;
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
     if (argument == "--help") {
@@ -146,6 +148,13 @@ Parsed parse(const int argc, char** argv) {
     } else if (name == "--seed") {
       parsed.options.seed = number(*value, "seed");
       seed_seen = true;
+    } else if (name == "--request-timeout-ms") {
+      const auto milliseconds = number(*value, "request timeout");
+      if (milliseconds < 50U || milliseconds > 10'000U) {
+        throw std::invalid_argument("request timeout must be in [50, 10000]");
+      }
+      parsed.options.request_timeout = std::chrono::milliseconds(milliseconds);
+      request_timeout_seen = true;
     } else if (name == "--server") {
       parsed.options.server_path = *value;
     } else if (name == "--artifacts") {
@@ -164,6 +173,10 @@ Parsed parse(const int argc, char** argv) {
   }
   if (replay.has_value() && no_chaos_seen) {
     throw std::invalid_argument("--no-chaos and --replay are incompatible");
+  }
+  if (replay.has_value() && request_timeout_seen) {
+    throw std::invalid_argument(
+        "--request-timeout-ms and --replay are incompatible");
   }
   if (replay.has_value()) {
     const auto metadata = forgekv::chaos::read_campaign_config(
@@ -188,6 +201,9 @@ Parsed parse(const int argc, char** argv) {
     parsed.options.action_interval =
         std::chrono::milliseconds(config.action_interval_ms);
     parsed.options.seed = config.seed;
+    parsed.options.enable_chaos = config.chaos_enabled;
+    parsed.options.request_timeout =
+        std::chrono::milliseconds(config.request_timeout_ms);
     auto timeline = forgekv::chaos::read_timeline(*replay);
     if (!timeline.ok()) {
       throw std::invalid_argument("replay: " + timeline.error);

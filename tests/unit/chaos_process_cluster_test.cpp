@@ -64,6 +64,19 @@ TEST(ProcessClusterTest, BuildsUniqueDirectedProxyTopologyForEverySource) {
             std::string::npos);
 }
 
+TEST(ProcessClusterTest, DirectPeerModeBypassesFaultProxies) {
+  ClusterDirectory directory;
+  auto config = test_config(directory.path());
+  config.enable_proxies = false;
+  ProcessCluster cluster(std::move(config));
+  ASSERT_TRUE(cluster.prepare().ok());
+  EXPECT_EQ(cluster.proxy_port(1U, 2U), 0U);
+  const auto arguments = cluster.server_arguments(1U);
+  EXPECT_NE(arguments.find("2=127.0.0.1:" +
+                           std::to_string(cluster.peer_port(2U)) + ":"),
+            std::string::npos);
+}
+
 TEST(ProcessClusterTest, OwnsPauseKillRestartAndBoundedStop) {
   ClusterDirectory directory;
   ProcessCluster cluster(test_config(directory.path()));

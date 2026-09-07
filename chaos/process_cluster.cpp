@@ -97,7 +97,8 @@ class ProcessCluster::Impl final {
       }
     }
     proxy_ports_.assign(config_.node_count * config_.node_count, 0U);
-    for (std::size_t source = 0U; source < nodes_.size(); ++source) {
+    for (std::size_t source = 0U;
+         config_.enable_proxies && source < nodes_.size(); ++source) {
       for (std::size_t destination = 0U; destination < nodes_.size();
            ++destination) {
         if (source == destination) {
@@ -375,8 +376,9 @@ class ProcessCluster::Impl final {
         "--client-timeout-ms", "1000",
     };
     for (const auto& peer : nodes_) {
-      const auto route = peer.id == node_id ? peer.peer_port
-                                             : proxy_port(node_id, peer.id);
+      const auto route = peer.id == node_id || !config_.enable_proxies
+                             ? peer.peer_port
+                             : proxy_port(node_id, peer.id);
       result.push_back("--peer");
       result.push_back(std::to_string(peer.id) + "=127.0.0.1:" +
                        std::to_string(route) + ":" +

@@ -162,3 +162,20 @@ CMake/CTest, GoogleTest, JSONL/Markdown evidence.
 6. Mark this plan complete with exact evidence, commit, push `main`, and verify
    `HEAD == origin/main` with a clean worktree.
 
+## Execution evidence
+
+- Tasks 1–6 are complete. Stable mode, profile validation, bounded direct
+  process execution, namespace ownership/cleanup, the experiment CLI, atomic
+  evidence, semantic documentation, and real-kernel regressions are implemented.
+- The required release matrix passed all seven profiles with 3 nodes, 8 clients,
+  three traffic seconds, and seed 150015. Netem observed 20, 79, and 189 drops at
+  0.1%, 1%, and 5%; every profile converged and verified a complete restart.
+- Real jitter and reordering smoke profiles passed. Their qdisc descriptions were
+  `delay 10ms 5ms` and `delay 10ms reorder 1% 25%`.
+- The first matrix exposed proxy-amplified latency at 100 ms; stable kernel tests
+  now bypass Phase 14 proxies and use a bounded profile-derived request timeout.
+  The second exposed a one-shot metrics scrape under 5% loss; evidence collection
+  now retries within the existing overall deadline. Both endpoints are permanent
+  privileged regressions.
+- Task 7 remains in progress until all debug/release/sanitizer gates and two
+  independent reviews are green.

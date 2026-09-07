@@ -68,6 +68,8 @@ struct AdminTextResult final {
 [[nodiscard]] ConvergenceResult wait_for_convergence(
     const std::vector<NodeAdminEndpoint>& endpoints,
     std::chrono::steady_clock::time_point deadline,
-    std::function<bool()> interrupted = {});
+    std::function<bool()> interrupted = {},
+    std::chrono::milliseconds maximum_request_timeout =
+        std::chrono::milliseconds(250));
 
 }  // namespace forgekv::chaos

@@ -25,6 +25,7 @@ struct HarnessOptions final {
   std::vector<ChaosAction> script;
   std::function<bool()> interrupted;
   bool enable_chaos{true};
+  std::chrono::milliseconds request_timeout{std::chrono::milliseconds(250)};
 };
 
 struct HarnessSummary final {

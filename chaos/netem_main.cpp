@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -179,6 +180,22 @@ void write_atomic(const std::filesystem::path& path, const std::string& text) {
   }
 }
 
+std::string cpu_description() {
+  std::ifstream input("/proc/cpuinfo");
+  std::string line;
+  std::size_t bytes = 0U;
+  while (std::getline(input, line) && bytes < 64U * 1024U) {
+    bytes += line.size() + 1U;
+    if (line.starts_with("model name")) {
+      const auto separator = line.find(':');
+      if (separator != std::string::npos) {
+        return "cpu_model=" + line.substr(separator + 1U) + "\n";
+      }
+    }
+  }
+  return "cpu_model=unavailable\n";
+}
+
 std::filesystem::path validate_paths(NetemRunnerOptions& options) {
   std::error_code error;
   options.chaos_path = std::filesystem::canonical(options.chaos_path, error);
@@ -275,7 +292,11 @@ int main(const int argc, char** argv) {
     }
     invocation += "]\n";
     const auto environment =
-        uname.output + tc.output + ip.output + invocation +
+        uname.output + tc.output + ip.output + cpu_description() +
+        "logical_cpus=" + std::to_string(std::thread::hardware_concurrency()) +
+        "\nchaos_path=" + parsed.options.chaos_path.string() +
+        "\nserver_path=" + parsed.options.server_path.string() + "\n" +
+        invocation +
         "fault_semantics=kernel packet impairment; not proxy reset; not partition\n";
     write_atomic(output / "environment.txt", environment);
 
