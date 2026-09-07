@@ -299,7 +299,8 @@ ChaosHarness::ChaosHarness(HarnessOptions options)
       options_.duration > std::chrono::hours(1) ||
       options_.action_interval < std::chrono::milliseconds(50) ||
       options_.server_path.empty() || options_.artifact_directory.empty() ||
-      options_.overall_timeout <= options_.duration) {
+      options_.overall_timeout <= options_.duration ||
+      (!options_.enable_chaos && !options_.script.empty())) {
     throw std::invalid_argument("invalid chaos harness options");
   }
   std::ranges::sort(options_.script, {}, &ChaosAction::planned_offset_us);
@@ -321,7 +322,8 @@ HarnessResult ChaosHarness::run() {
       ",\"duration_ms\":" + std::to_string(options_.duration.count()) +
       ",\"action_interval_ms\":" +
       std::to_string(options_.action_interval.count()) + ",\"seed\":" +
-      std::to_string(options_.seed) + "}\n";
+      std::to_string(options_.seed) + ",\"chaos_enabled\":" +
+      (options_.enable_chaos ? "true" : "false") + "}\n";
   if (const auto status = artifacts.publish("config.json", config_text);
       !status.ok()) {
     result.diagnostic = status.error;
@@ -505,7 +507,7 @@ HarnessResult ChaosHarness::run() {
                 requested = options_.script[script_index];
                 due = elapsed_us(chaos_start) >= requested.planned_offset_us;
               }
-            } else if (Clock::now() >= next_action) {
+            } else if (options_.enable_chaos && Clock::now() >= next_action) {
               requested = scheduler.next(
                   static_cast<std::uint64_t>(
                       std::chrono::duration_cast<std::chrono::microseconds>(
@@ -828,6 +830,8 @@ HarnessResult ChaosHarness::run() {
       ",\"acknowledged_writes\":" +
       std::to_string(result.summary.acknowledged_writes) +
       ",\"actions\":" + std::to_string(result.summary.actions) +
+      ",\"chaos_enabled\":" +
+      (options_.enable_chaos ? "true" : "false") +
       ",\"converged\":" +
       std::string(result.summary.converged ? "true" : "false") +
       ",\"restart_verified\":" +

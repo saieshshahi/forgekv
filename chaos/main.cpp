@@ -33,6 +33,7 @@ void usage(std::ostream& output) {
       "  --seed UINT64                   decision seed\n"
       "  --artifacts PATH                output directory\n"
       "  --replay TIMELINE               replay realized actions\n"
+      "  --no-chaos                     stable workload without scheduled faults\n"
       "  --keep-success                  retain passing artifacts\n"
       "  --help\n";
 }
@@ -74,6 +75,7 @@ Parsed parse(const int argc, char** argv) {
   bool duration_seen = false;
   bool interval_seen = false;
   bool seed_seen = false;
+  bool no_chaos_seen = false;
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
     if (argument == "--help") {
@@ -93,6 +95,14 @@ Parsed parse(const int argc, char** argv) {
       }
       parsed.keep_success = true;
       parsed.options.keep_success = true;
+      continue;
+    }
+    if (name == "--no-chaos") {
+      if (inline_value(argument).has_value()) {
+        throw std::invalid_argument("--no-chaos takes no value");
+      }
+      parsed.options.enable_chaos = false;
+      no_chaos_seen = true;
       continue;
     }
     auto value = inline_value(argument);
@@ -151,6 +161,9 @@ Parsed parse(const int argc, char** argv) {
   }
   if (replay.has_value() && seed_seen) {
     throw std::invalid_argument("--seed and --replay are incompatible");
+  }
+  if (replay.has_value() && no_chaos_seen) {
+    throw std::invalid_argument("--no-chaos and --replay are incompatible");
   }
   if (replay.has_value()) {
     const auto metadata = forgekv::chaos::read_campaign_config(

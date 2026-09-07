@@ -120,6 +120,33 @@ TEST(ChaosHarnessTest, ScriptedFailoverRestartsAndVerifiesAcknowledgedState) {
   EXPECT_TRUE(std::filesystem::exists(directory.path() / "replay.txt"));
 }
 
+TEST(ChaosHarnessTest, StableWorkloadSchedulesNoFaultsAndStillVerifiesRestart) {
+  using namespace std::chrono_literals;
+  HarnessDirectory directory;
+  HarnessOptions options{
+      .node_count = 3U,
+      .client_count = 3U,
+      .duration = 1s,
+      .action_interval = 250ms,
+      .seed = 150015U,
+      .server_path = FORGEKV_SERVER_PATH,
+      .artifact_directory = directory.path(),
+      .overall_timeout = 45s,
+      .enable_chaos = false,
+  };
+
+  const auto result = ChaosHarness(std::move(options)).run();
+  ASSERT_TRUE(result.ok()) << result.diagnostic;
+  EXPECT_EQ(result.summary.actions, 0U);
+  EXPECT_GT(result.summary.attempts, 0U);
+  EXPECT_GT(result.summary.acknowledged_writes, 0U);
+  EXPECT_TRUE(result.summary.converged);
+  EXPECT_TRUE(result.summary.restart_verified);
+  EXPECT_NE(read_text(directory.path() / "config.json")
+                .find("\"chaos_enabled\":false"),
+            std::string::npos);
+}
+
 TEST(ChaosHarnessTest, InterruptionUsesBoundedCleanupAndReapsChildren) {
   using namespace std::chrono_literals;
   HarnessDirectory directory;

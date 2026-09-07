@@ -24,6 +24,7 @@ struct HarnessOptions final {
   bool keep_success{true};
   std::vector<ChaosAction> script;
   std::function<bool()> interrupted;
+  bool enable_chaos{true};
 };
 
 struct HarnessSummary final {
