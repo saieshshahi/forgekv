@@ -3,6 +3,7 @@
 #include "chaos/process_runner.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cctype>
@@ -12,10 +13,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <initializer_list>
 #include <optional>
 #include <set>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
@@ -198,28 +201,42 @@ std::string cpu_description() {
   return "cpu_model=unavailable\n";
 }
 
-void reject_symlinked_components(const std::filesystem::path& path) {
+void create_private_artifacts_path(const std::filesystem::path& path) {
   std::filesystem::path current;
   for (const auto& component : path) {
     current /= component;
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(current, error);
-    if (error == std::errc::no_such_file_or_directory) return;
-    if (error) {
-      throw std::invalid_argument("cannot inspect artifacts path");
+    struct stat metadata {};
+    if (::lstat(current.c_str(), &metadata) != 0) {
+      if (errno != ENOENT || ::mkdir(current.c_str(), 0700) != 0 ||
+          ::lstat(current.c_str(), &metadata) != 0) {
+        throw std::invalid_argument("cannot create private artifacts path");
+      }
+    } else if (current == path) {
+      throw std::invalid_argument("artifacts path must be absent");
     }
-    if (std::filesystem::is_symlink(status)) {
+    if (S_ISLNK(metadata.st_mode)) {
       throw std::invalid_argument(
           "artifacts path must not contain a symlink component");
     }
-    if (!std::filesystem::exists(status)) return;
+    if (!S_ISDIR(metadata.st_mode) || metadata.st_uid != 0U) {
+      throw std::invalid_argument(
+          "artifacts path requires a trusted root-owned parent");
+    }
+    const auto writable = metadata.st_mode & (S_IWGRP | S_IWOTH);
+    const auto sticky = (metadata.st_mode & S_ISVTX) != 0;
+    if (writable != 0 && !sticky) {
+      throw std::invalid_argument(
+          "artifacts path requires a trusted root-owned parent");
+    }
   }
 }
 
 std::string executable_sha256(forgekv::chaos::CommandExecutor& executor,
+                              const std::filesystem::path& sha256_path,
                               const std::filesystem::path& path,
                               const std::string_view label) {
-  const auto result = executor.run({"sha256sum", "--", path.string()}, {});
+  const auto result =
+      executor.run({sha256_path.string(), "--", path.string()}, {});
   const auto separator = result.output.find_first_of(" \t\r\n");
   const auto hash = result.output.substr(0U, separator);
   const auto hexadecimal = hash.size() == 64U &&
@@ -233,6 +250,21 @@ std::string executable_sha256(forgekv::chaos::CommandExecutor& executor,
                              " executable build");
   }
   return std::string(label) + "_sha256=" + hash + "\n";
+}
+
+std::filesystem::path resolve_tool(
+    const std::initializer_list<std::filesystem::path> candidates,
+    const std::string_view name) {
+  for (const auto& candidate : candidates) {
+    std::error_code error;
+    const auto resolved = std::filesystem::canonical(candidate, error);
+    if (!error && std::filesystem::is_regular_file(resolved) &&
+        ::access(resolved.c_str(), X_OK) == 0) {
+      return resolved;
+    }
+  }
+  throw std::runtime_error("required " + std::string(name) +
+                           " tool is unavailable");
 }
 
 std::filesystem::path validate_paths(NetemRunnerOptions& options) {
@@ -253,21 +285,11 @@ std::filesystem::path validate_paths(NetemRunnerOptions& options) {
       output == std::filesystem::current_path()) {
     throw std::invalid_argument("unsafe artifacts path");
   }
-  reject_symlinked_components(output);
   if (const auto* home = std::getenv("HOME"); home != nullptr &&
       output == std::filesystem::path(home).lexically_normal()) {
     throw std::invalid_argument("artifacts path must not be a home directory");
   }
-  if (std::filesystem::exists(output, error)) {
-    if (error || std::filesystem::is_symlink(output) ||
-        !std::filesystem::is_directory(output) ||
-        !std::filesystem::is_empty(output, error) || error) {
-      throw std::invalid_argument("artifacts path must be absent or empty");
-    }
-  } else {
-    std::filesystem::create_directories(output, error);
-    if (error) throw std::invalid_argument("cannot create artifacts path");
-  }
+  create_private_artifacts_path(output);
   options.output_directory = output;
   return output;
 }
@@ -291,7 +313,7 @@ std::string result_json(const forgekv::chaos::NetemProfileResult& result,
          ",\"wall_duration_ms\":" +
          std::to_string(result.wall_duration.count()) +
          ",\"exit_code\":" + std::to_string(result.workload_exit_code) +
-         ",\"passed\":" + (result.summary.passed ? "true" : "false") +
+         ",\"passed\":" + (result.ok() ? "true" : "false") +
          ",\"attempts\":" + std::to_string(result.summary.attempts) +
          ",\"acknowledged_writes\":" +
          std::to_string(result.summary.acknowledged_writes) +
@@ -319,9 +341,17 @@ int main(const int argc, char** argv) {
     parsed.options.interrupted = [] { return interrupted != 0; };
 
     forgekv::chaos::PosixCommandExecutor executor;
-    const auto uname = executor.run({"uname", "-sr"}, {});
-    const auto tc = executor.run({"tc", "-V"}, {});
-    const auto ip = executor.run({"ip", "-V"}, {});
+    const auto uname_path =
+        resolve_tool({"/usr/bin/uname", "/bin/uname"}, "uname");
+    const auto ip_path = resolve_tool({"/usr/sbin/ip", "/sbin/ip"}, "ip");
+    const auto tc_path = resolve_tool({"/usr/sbin/tc", "/sbin/tc"}, "tc");
+    const auto sha256_path = resolve_tool(
+        {"/usr/bin/sha256sum", "/bin/sha256sum"}, "sha256sum");
+    parsed.options.ip_path = ip_path;
+    parsed.options.tc_path = tc_path;
+    const auto uname = executor.run({uname_path.string(), "-sr"}, {});
+    const auto tc = executor.run({tc_path.string(), "-V"}, {});
+    const auto ip = executor.run({ip_path.string(), "-V"}, {});
     if (!uname.ok() || !tc.ok() || !ip.ok()) {
       throw std::runtime_error(
           "required uname/ip/tc tools are unavailable");
@@ -332,12 +362,22 @@ int main(const int argc, char** argv) {
       invocation += json_string(argv[index]);
     }
     invocation += "]\n";
+    std::error_code self_error;
+    const auto self_path =
+        std::filesystem::canonical("/proc/self/exe", self_error);
+    if (self_error || self_path.empty()) {
+      throw std::runtime_error("cannot resolve netem executable build");
+    }
+    const auto netem_identity =
+        executable_sha256(executor, sha256_path, self_path, "netem");
+    const auto chaos_identity = executable_sha256(
+        executor, sha256_path, parsed.options.chaos_path, "chaos");
+    const auto server_identity = executable_sha256(
+        executor, sha256_path, parsed.options.server_path, "server");
     const auto environment =
         uname.output + tc.output + ip.output + cpu_description() +
-        "compiler=" + std::string(__VERSION__) + "\n" +
-        executable_sha256(executor, "/proc/self/exe", "netem") +
-        executable_sha256(executor, parsed.options.chaos_path, "chaos") +
-        executable_sha256(executor, parsed.options.server_path, "server") +
+        "compiler=" + std::string(__VERSION__) + "\n" + netem_identity +
+        chaos_identity + server_identity +
         "logical_cpus=" + std::to_string(std::thread::hardware_concurrency()) +
         "\nchaos_path=" + parsed.options.chaos_path.string() +
         "\nserver_path=" + parsed.options.server_path.string() + "\n" +
@@ -348,7 +388,30 @@ int main(const int argc, char** argv) {
     forgekv::chaos::NetemRunner runner(
         executor, static_cast<std::uint32_t>(::geteuid()),
         static_cast<std::uint64_t>(::getpid()));
-    const auto matrix = runner.run(parsed.options);
+    auto matrix = runner.run(parsed.options);
+    std::string identity_error;
+    try {
+      if (netem_identity !=
+              executable_sha256(executor, sha256_path, self_path, "netem") ||
+          chaos_identity != executable_sha256(
+                                executor, sha256_path,
+                                parsed.options.chaos_path, "chaos") ||
+          server_identity != executable_sha256(
+                                 executor, sha256_path,
+                                 parsed.options.server_path, "server")) {
+        identity_error = "executable identity changed during experiment";
+      }
+    } catch (const std::exception& error) {
+      identity_error =
+          "executable identity changed or became unreadable during experiment: " +
+          std::string(error.what());
+    }
+    if (!identity_error.empty()) {
+      if (matrix.error.empty()) matrix.error = identity_error;
+      if (!matrix.profiles.empty() && matrix.profiles.back().error.empty()) {
+        matrix.profiles.back().error = identity_error;
+      }
+    }
     std::string jsonl;
     std::string markdown =
         "# ForgeKV netem matrix\n\n"

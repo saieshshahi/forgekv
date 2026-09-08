@@ -1,5 +1,7 @@
 include(GoogleTest)
 
+add_executable(forgekv_saturating_writer helpers/saturating_writer.cpp)
+
 add_executable(forgekv_unit_tests
   unit/cluster_codecs_test.cpp
   unit/chaos_client_state_test.cpp
@@ -43,8 +45,9 @@ target_link_libraries(forgekv_unit_tests PRIVATE
 target_include_directories(forgekv_unit_tests PRIVATE ${PROJECT_SOURCE_DIR})
 target_compile_definitions(forgekv_unit_tests PRIVATE
   FORGEKV_SERVER_PATH="$<TARGET_FILE:forgekv_server>"
+  FORGEKV_SATURATING_WRITER_PATH="$<TARGET_FILE:forgekv_saturating_writer>"
 )
-add_dependencies(forgekv_unit_tests forgekv_server)
+add_dependencies(forgekv_unit_tests forgekv_server forgekv_saturating_writer)
 
 gtest_discover_tests(forgekv_unit_tests DISCOVERY_MODE PRE_TEST)
 

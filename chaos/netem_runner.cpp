@@ -22,8 +22,9 @@ std::string command_failure(const std::string_view action,
 }
 
 std::vector<std::string> in_namespace(const std::string& name,
+                                      const std::filesystem::path& ip_path,
                                       std::vector<std::string> command) {
-  std::vector<std::string> result{"ip", "netns", "exec", name};
+  std::vector<std::string> result{ip_path.string(), "netns", "exec", name};
   result.insert(result.end(), std::make_move_iterator(command.begin()),
                 std::make_move_iterator(command.end()));
   return result;
@@ -44,9 +45,11 @@ std::uint64_t request_timeout_ms(const NetemProfile& profile) {
 class NamespaceGuard final {
  public:
   NamespaceGuard(CommandExecutor& executor, std::string name,
+                 std::filesystem::path ip_path,
                  CommandOptions cleanup_options)
       : executor_(executor),
         name_(std::move(name)),
+        ip_path_(std::move(ip_path)),
         cleanup_options_(std::move(cleanup_options)) {}
 
   ~NamespaceGuard() { static_cast<void>(cleanup()); }
@@ -62,7 +65,8 @@ class NamespaceGuard final {
     if (!owns_namespace_) return result;
     owns_namespace_ = false;
     try {
-      return executor_.run({"ip", "netns", "del", name_}, cleanup_options_);
+      return executor_.run(
+          {ip_path_.string(), "netns", "del", name_}, cleanup_options_);
     } catch (const std::exception& error) {
       result.exit_code = -1;
       result.error = std::string("namespace cleanup exception: ") + error.what();
@@ -76,6 +80,7 @@ class NamespaceGuard final {
  private:
   CommandExecutor& executor_;
   std::string name_;
+  std::filesystem::path ip_path_;
   CommandOptions cleanup_options_;
   bool owns_namespace_{false};
 };
@@ -114,6 +119,7 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
   }
   if (options.chaos_path.empty() || options.server_path.empty() ||
       options.output_directory.empty() || options.profiles.empty() ||
+      !options.ip_path.is_absolute() || !options.tc_path.is_absolute() ||
       (options.nodes != 3U && options.nodes != 5U) || options.clients == 0U ||
       options.clients > 256U || options.duration.count() <= 0 ||
       options.duration > std::chrono::hours(1)) {
@@ -134,10 +140,13 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
   for (std::size_t index = 0U; index < options.profiles.size(); ++index) {
     NetemProfileResult profile_result;
     profile_result.profile = options.profiles[index];
-    const auto netem = make_netem_arguments(profile_result.profile);
+    auto netem = make_netem_arguments(profile_result.profile);
     if (!netem.ok()) {
       matrix.error = netem.error;
       return matrix;
+    }
+    if (!netem.arguments.empty()) {
+      netem.arguments.front() = options.tc_path.string();
     }
     const auto namespace_name = "fkv-netem-" + std::to_string(process_tag_) +
                                 "-" + std::to_string(index);
@@ -147,7 +156,7 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
       return matrix;
     }
 
-    NamespaceGuard namespace_guard(executor_, namespace_name,
+    NamespaceGuard namespace_guard(executor_, namespace_name, options.ip_path,
                                    lifecycle_options);
     const auto fail = [&](const std::string& diagnostic) {
       profile_result.error = diagnostic;
@@ -162,94 +171,98 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
 
     try {
       const auto created = executor_.run(
-          {"ip", "netns", "add", namespace_name}, lifecycle_options);
-    if (!created.ok()) {
-      fail(command_failure("namespace create", created));
-      if (options.interrupted && options.interrupted()) return matrix;
-      continue;
-    }
-    namespace_guard.take_ownership();
-    const auto loopback = executor_.run(
-        in_namespace(namespace_name, {"ip", "link", "set", "lo", "up"}),
-        setup_options);
-    if (!loopback.ok()) {
-      fail(command_failure("enable isolated loopback", loopback));
-      if (options.interrupted && options.interrupted()) return matrix;
-      continue;
-    }
-    if (!netem.arguments.empty()) {
-      const auto applied = executor_.run(
-          in_namespace(namespace_name, netem.arguments), setup_options);
-      if (!applied.ok()) {
-        fail(command_failure("apply netem profile", applied));
+          {options.ip_path.string(), "netns", "add", namespace_name},
+          lifecycle_options);
+      if (!created.ok()) {
+        fail(command_failure("namespace create", created));
         if (options.interrupted && options.interrupted()) return matrix;
         continue;
       }
-    }
-
-    std::vector<std::string> workload{
-        options.chaos_path.string(),
-        "--nodes", std::to_string(options.nodes),
-        "--clients", std::to_string(options.clients),
-        "--duration", std::to_string(options.duration.count()),
-        "--request-timeout-ms",
-        std::to_string(request_timeout_ms(profile_result.profile)),
-        "--seed", std::to_string(options.seed),
-        "--server", options.server_path.string(),
-        "--artifacts",
-        (options.output_directory / profile_result.profile.name).string(),
-        "--keep-success", "--no-chaos",
-    };
-    const auto started = Clock::now();
-    const auto workload_result = executor_.run(
-        in_namespace(namespace_name, std::move(workload)),
-        CommandOptions{
-            .timeout = options.duration + std::chrono::seconds(120),
-            .maximum_output_bytes = 64U * 1024U,
-            .interrupted = options.interrupted,
-        });
-    profile_result.wall_duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() -
-                                                              started);
-    profile_result.workload_exit_code = workload_result.exit_code;
-    profile_result.workload_output = workload_result.output;
-    const auto summary = parse_chaos_output(workload_result.output);
-    if (!summary.ok()) {
-      fail(command_failure("stable ForgeKV workload", workload_result) +
-           "; " + summary.error);
-      if (options.interrupted && options.interrupted()) return matrix;
-      continue;
-    }
-    profile_result.summary = *summary.summary;
-
-    if (!netem.arguments.empty()) {
-      const auto stats_result = executor_.run(
-          in_namespace(namespace_name,
-                       {"tc", "-s", "qdisc", "show", "dev", "lo"}),
+      namespace_guard.take_ownership();
+      const auto loopback = executor_.run(
+          in_namespace(namespace_name, options.ip_path,
+                       {options.ip_path.string(), "link", "set", "lo", "up"}),
           setup_options);
-      const auto stats = parse_qdisc_stats(stats_result.output);
-      profile_result.qdisc_output = stats_result.output;
-      if (!stats_result.ok() || !stats.ok()) {
-        fail(command_failure("collect qdisc statistics", stats_result) +
-             (stats.ok() ? "" : "; " + stats.error));
+      if (!loopback.ok()) {
+        fail(command_failure("enable isolated loopback", loopback));
         if (options.interrupted && options.interrupted()) return matrix;
         continue;
       }
-      profile_result.qdisc = *stats.stats;
-    }
+      if (!netem.arguments.empty()) {
+        const auto applied = executor_.run(
+            in_namespace(namespace_name, options.ip_path, netem.arguments),
+            setup_options);
+        if (!applied.ok()) {
+          fail(command_failure("apply netem profile", applied));
+          if (options.interrupted && options.interrupted()) return matrix;
+          continue;
+        }
+      }
 
-    const auto cleaned = namespace_guard.cleanup();
-    if (!cleaned.ok()) {
-      profile_result.error = command_failure("namespace cleanup", cleaned);
-    } else if (!workload_result.ok() ||
-               !profile_result.stable_contract_met()) {
-      profile_result.error = command_failure("stable ForgeKV workload",
-                                             workload_result);
-    }
-    matrix.profiles.push_back(std::move(profile_result));
-    if (!matrix.profiles.back().ok()) {
-      if (matrix.error.empty()) matrix.error = matrix.profiles.back().error;
-    }
+      std::vector<std::string> workload{
+          options.chaos_path.string(),
+          "--nodes", std::to_string(options.nodes),
+          "--clients", std::to_string(options.clients),
+          "--duration", std::to_string(options.duration.count()),
+          "--request-timeout-ms",
+          std::to_string(request_timeout_ms(profile_result.profile)),
+          "--seed", std::to_string(options.seed),
+          "--server", options.server_path.string(),
+          "--artifacts",
+          (options.output_directory / profile_result.profile.name).string(),
+          "--keep-success", "--no-chaos",
+      };
+      const auto started = Clock::now();
+      const auto workload_result = executor_.run(
+          in_namespace(namespace_name, options.ip_path, std::move(workload)),
+          CommandOptions{
+              .timeout = options.duration + std::chrono::seconds(120),
+              .maximum_output_bytes = 64U * 1024U,
+              .interrupted = options.interrupted,
+          });
+      profile_result.wall_duration =
+          std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() -
+                                                                started);
+      profile_result.workload_exit_code = workload_result.exit_code;
+      profile_result.workload_output = workload_result.output;
+      const auto summary = parse_chaos_output(workload_result.output);
+      if (!summary.ok()) {
+        fail(command_failure("stable ForgeKV workload", workload_result) +
+             "; " + summary.error);
+        if (options.interrupted && options.interrupted()) return matrix;
+        continue;
+      }
+      profile_result.summary = *summary.summary;
+
+      if (!netem.arguments.empty()) {
+        const auto stats_result = executor_.run(
+            in_namespace(namespace_name, options.ip_path,
+                         {options.tc_path.string(), "-s", "qdisc", "show",
+                          "dev", "lo"}),
+            setup_options);
+        const auto stats = parse_qdisc_stats(stats_result.output);
+        profile_result.qdisc_output = stats_result.output;
+        if (!stats_result.ok() || !stats.ok()) {
+          fail(command_failure("collect qdisc statistics", stats_result) +
+               (stats.ok() ? "" : "; " + stats.error));
+          if (options.interrupted && options.interrupted()) return matrix;
+          continue;
+        }
+        profile_result.qdisc = *stats.stats;
+      }
+
+      const auto cleaned = namespace_guard.cleanup();
+      if (!cleaned.ok()) {
+        profile_result.error = command_failure("namespace cleanup", cleaned);
+      } else if (!workload_result.ok() ||
+                 !profile_result.stable_contract_met()) {
+        profile_result.error = command_failure("stable ForgeKV workload",
+                                               workload_result);
+      }
+      matrix.profiles.push_back(std::move(profile_result));
+      if (!matrix.profiles.back().ok()) {
+        if (matrix.error.empty()) matrix.error = matrix.profiles.back().error;
+      }
     } catch (const std::exception& error) {
       fail(std::string("netem profile exception: ") + error.what());
       if (options.interrupted && options.interrupted()) return matrix;

@@ -46,6 +46,7 @@ void drain_pipe(const int descriptor, const std::size_t maximum,
         result.output.append(buffer, std::min(count, remaining));
       }
       exceeded = exceeded || count > remaining;
+      if (exceeded) return;
       continue;
     }
     if (bytes < 0 && errno == EINTR) continue;

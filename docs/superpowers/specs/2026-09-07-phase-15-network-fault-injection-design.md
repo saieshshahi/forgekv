@@ -93,6 +93,11 @@ The runner must fail closed unless all of these are true:
 - the target device is exactly `lo` inside the newly created namespace;
 - the namespace did not exist before this run;
 - the server binary is a regular executable file;
+- the output directory is absent, is created privately, and every existing
+  ancestor is root-owned and non-writable by group/other except for standard
+  root-owned sticky directories;
+- privileged helper binaries are resolved through fixed absolute paths rather
+  than the ambient `PATH`;
 - the output directory is not `/`, a home directory, or the repository root.
 
 The runner never executes `tc` against a device in the default network

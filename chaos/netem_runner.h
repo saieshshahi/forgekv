@@ -18,6 +18,8 @@ struct NetemRunnerOptions final {
   std::filesystem::path chaos_path;
   std::filesystem::path server_path;
   std::filesystem::path output_directory;
+  std::filesystem::path ip_path{"/usr/sbin/ip"};
+  std::filesystem::path tc_path{"/usr/sbin/tc"};
   std::vector<NetemProfile> profiles;
   std::size_t nodes{3U};
   std::size_t clients{4U};

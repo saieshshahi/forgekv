@@ -35,7 +35,7 @@ On native Linux, run the complete required matrix as root:
 sudo ./build/release/chaos/forgekv-netem \
   --chaos ./build/release/chaos/forgekv-chaos \
   --server ./build/release/src/forgekv-server \
-  --artifacts ./build/phase15-netem \
+  --artifacts /root/forgekv-phase15-netem \
   --nodes 3 --clients 8 --duration 10 --seed 150015
 ```
 
@@ -46,12 +46,16 @@ repository path to its `/mnt/c/...` form:
 wsl -d Ubuntu -u root -- /mnt/c/path/to/forgekv/build/release/chaos/forgekv-netem `
   --chaos /mnt/c/path/to/forgekv/build/release/chaos/forgekv-chaos `
   --server /mnt/c/path/to/forgekv/build/release/src/forgekv-server `
-  --artifacts /mnt/c/path/to/forgekv/build/phase15-netem `
+  --artifacts /root/forgekv-phase15-netem `
   --nodes 3 --clients 8 --duration 10 --seed 150015
 ```
 
-The output directory must be absent or empty. `/`, the current repository root,
-a home directory, any path with a symlinked component, a missing executable, an
+The output directory must be absent. The runner creates every missing component
+with private permissions, and every existing ancestor must be root-owned and
+not group/other-writable (a root-owned sticky directory such as `/tmp` is the
+only writable-parent exception). Do not point the root runner into a
+user-writable checkout or mounted Windows directory. `/`, the current repository
+root, a home directory, any symlinked component, a missing executable, an
 unknown profile, duplicate options, and non-root execution are rejected before
 any namespace is created.
 
@@ -63,7 +67,9 @@ exercise the additional kernel behaviors.
 ## Safety and cleanup
 
 Namespace names are generated internally as `fkv-netem-<pid>-<index>` and
-validated before use. Commands use direct argument arrays, not shell evaluation.
+validated before use. Commands use direct argument arrays, not shell evaluation;
+privileged helper paths are resolved from a fixed allowlist and never from the
+ambient `PATH`.
 The only accepted qdisc device is `lo`, always reached through
 `ip netns exec <owned-name>`. Namespace creation and deletion are bounded but do
 not honor the stop flag mid-operation; this deliberate exception closes the race

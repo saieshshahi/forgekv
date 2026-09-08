@@ -131,7 +131,8 @@ CMake/CTest, GoogleTest, JSONL/Markdown evidence.
 
 **Files:**
 
-- Generate ignored evidence under: `build/phase15-netem/`
+- Generate evidence under a newly created private root-owned directory such as
+  `/root/forgekv-phase15-netem/`
 - Update: `docs/network-fault-injection.md`
 
 1. Build the release runner and server.

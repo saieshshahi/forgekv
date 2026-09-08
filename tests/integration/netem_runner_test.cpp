@@ -11,7 +11,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <thread>
 
@@ -129,6 +131,31 @@ TEST(NetemIntegrationTest, CliRejectsSymlinkedArtifactsAncestor) {
   EXPECT_FALSE(std::filesystem::exists(target / "new-output"));
 }
 
+TEST(NetemIntegrationTest, CliRejectsUserWritableArtifactsParent) {
+  if (::geteuid() != 0) {
+    GTEST_SKIP() << "requires root to reach privileged CLI path validation";
+  }
+  using namespace std::chrono_literals;
+  NetemDirectory directory;
+  const auto unsafe_parent = directory.path() / "user-writable";
+  std::error_code error;
+  std::filesystem::create_directories(unsafe_parent, error);
+  ASSERT_FALSE(error) << error.message();
+  ASSERT_EQ(::chmod(unsafe_parent.c_str(), 0777), 0);
+
+  PosixCommandExecutor executor;
+  const auto result = executor.run(
+      {FORGEKV_NETEM_PATH, "--chaos", FORGEKV_CHAOS_PATH, "--server",
+       FORGEKV_SERVER_PATH, "--artifacts",
+       (unsafe_parent / "new-output").string(), "--clients", "1",
+       "--duration", "1", "--profile", "baseline"},
+      CommandOptions{.timeout = 15s});
+  EXPECT_FALSE(result.ok());
+  EXPECT_NE(result.output.find("trusted root-owned parent"), std::string::npos)
+      << result.output;
+  EXPECT_FALSE(std::filesystem::exists(unsafe_parent / "new-output"));
+}
+
 TEST(NetemIntegrationTest, CliEvidenceIdentifiesEveryExecutableBuild) {
   if (::geteuid() != 0) {
     GTEST_SKIP() << "requires root and Linux network namespace capability";
@@ -152,6 +179,13 @@ TEST(NetemIntegrationTest, CliEvidenceIdentifiesEveryExecutableBuild) {
   EXPECT_NE(environment.find("chaos_sha256="), std::string::npos);
   EXPECT_NE(environment.find("server_sha256="), std::string::npos);
   EXPECT_NE(environment.find("compiler="), std::string::npos);
+  const auto actual_runner_hash = executor.run(
+      {"sha256sum", "--", FORGEKV_NETEM_PATH}, CommandOptions{.timeout = 5s});
+  ASSERT_TRUE(actual_runner_hash.ok()) << actual_runner_hash.error;
+  ASSERT_GE(actual_runner_hash.output.size(), 64U);
+  EXPECT_NE(environment.find("netem_sha256=" +
+                             actual_runner_hash.output.substr(0U, 64U)),
+            std::string::npos);
 
   std::ifstream results_input(output / "results.jsonl", std::ios::binary);
   ASSERT_TRUE(results_input.is_open());
@@ -161,24 +195,82 @@ TEST(NetemIntegrationTest, CliEvidenceIdentifiesEveryExecutableBuild) {
   EXPECT_EQ(results.find("latency-"), std::string::npos);
 }
 
-TEST(NetemIntegrationTest, CliFailsBeforeNamespaceWhenRequiredToolsAreMissing) {
+TEST(NetemIntegrationTest, CliIgnoresAnUntrustedAmbientPath) {
   if (::geteuid() != 0) {
     GTEST_SKIP() << "requires root to reach privileged CLI tool validation";
   }
   using namespace std::chrono_literals;
   NetemDirectory directory;
-  const auto output = directory.path() / "missing-tools";
+  const auto output = directory.path() / "fixed-tools";
   PosixCommandExecutor executor;
   const auto result = executor.run(
       {"/usr/bin/env", "PATH=/definitely-missing", FORGEKV_NETEM_PATH,
        "--chaos", FORGEKV_CHAOS_PATH, "--server", FORGEKV_SERVER_PATH,
        "--artifacts", output.string(), "--profile", "baseline"},
-      CommandOptions{.timeout = 10s});
-  EXPECT_FALSE(result.ok());
-  EXPECT_NE(result.output.find("tools are unavailable"), std::string::npos)
-      << result.output;
-  EXPECT_FALSE(std::filesystem::exists(output / "environment.txt"));
-  EXPECT_FALSE(std::filesystem::exists(output / "results.jsonl"));
+      CommandOptions{.timeout = 30s});
+  EXPECT_TRUE(result.ok()) << result.error << result.output;
+  EXPECT_TRUE(std::filesystem::exists(output / "environment.txt"));
+  EXPECT_TRUE(std::filesystem::exists(output / "results.jsonl"));
+}
+
+TEST(NetemIntegrationTest, CliFailsIfWorkloadExecutableChangesDuringRun) {
+  if (::geteuid() != 0) {
+    GTEST_SKIP() << "requires root and Linux network namespace capability";
+  }
+  using namespace std::chrono_literals;
+  NetemDirectory directory;
+  std::error_code error;
+  std::filesystem::create_directories(directory.path(), error);
+  ASSERT_FALSE(error) << error.message();
+  const auto chaos_copy = directory.path() / "forgekv-chaos";
+  std::filesystem::copy_file(FORGEKV_CHAOS_PATH, chaos_copy, error);
+  ASSERT_FALSE(error) << error.message();
+  std::filesystem::permissions(
+      chaos_copy, std::filesystem::perms::owner_exec,
+      std::filesystem::perm_options::add, error);
+  ASSERT_FALSE(error) << error.message();
+
+  const auto output = directory.path() / "identity-change";
+  PosixCommandExecutor executor;
+  std::optional<CommandResult> result;
+  std::thread run([&] {
+    result = executor.run(
+        {FORGEKV_NETEM_PATH, "--chaos", chaos_copy.string(), "--server",
+         FORGEKV_SERVER_PATH, "--artifacts", output.string(), "--clients", "1",
+         "--duration", "1", "--profile", "baseline"},
+        CommandOptions{.timeout = 30s});
+  });
+  const auto children = output / "baseline" / "children.txt";
+  const auto deadline = std::chrono::steady_clock::now() + 15s;
+  while (!std::filesystem::exists(children) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(20ms);
+  }
+  if (!std::filesystem::exists(children)) {
+    run.join();
+    FAIL() << "workload children did not start";
+    return;
+  }
+  const auto replacement = directory.path() / "replacement";
+  std::filesystem::copy_file("/bin/true", replacement, error);
+  if (error) {
+    run.join();
+    FAIL() << error.message();
+    return;
+  }
+  std::filesystem::rename(replacement, chaos_copy, error);
+  if (error) {
+    run.join();
+    FAIL() << error.message();
+    return;
+  }
+  run.join();
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->ok());
+  EXPECT_NE(result->output.find("executable identity changed"),
+            std::string::npos)
+      << result->output;
 }
 
 }  // namespace

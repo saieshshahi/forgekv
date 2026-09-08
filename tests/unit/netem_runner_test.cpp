@@ -92,20 +92,20 @@ TEST(NetemRunnerTest, BaselineCreatesRunsAndDeletesWithoutQdisc) {
   EXPECT_TRUE(result.profiles.front().summary.passed);
   ASSERT_EQ(executor.calls.size(), 4U);
   EXPECT_EQ(executor.calls[0],
-            (std::vector<std::string>{"ip", "netns", "add",
+            (std::vector<std::string>{"/usr/sbin/ip", "netns", "add",
                                       "fkv-netem-42-0"}));
   EXPECT_EQ(executor.calls[1],
-            (std::vector<std::string>{"ip", "netns", "exec",
-                                      "fkv-netem-42-0", "ip", "link", "set",
-                                      "lo", "up"}));
-  EXPECT_EQ(executor.calls[2][0], "ip");
+            (std::vector<std::string>{"/usr/sbin/ip", "netns", "exec",
+                                      "fkv-netem-42-0", "/usr/sbin/ip",
+                                      "link", "set", "lo", "up"}));
+  EXPECT_EQ(executor.calls[2][0], "/usr/sbin/ip");
   EXPECT_EQ(executor.calls[2][4], "/opt/forgekv/forgekv-chaos");
   EXPECT_NE(std::ranges::find(executor.calls[2], "--no-chaos"),
             executor.calls[2].end());
   EXPECT_NE(std::ranges::find(executor.calls[2], "--request-timeout-ms"),
             executor.calls[2].end());
   EXPECT_EQ(executor.calls[3],
-            (std::vector<std::string>{"ip", "netns", "del",
+            (std::vector<std::string>{"/usr/sbin/ip", "netns", "del",
                                       "fkv-netem-42-0"}));
 }
 
@@ -130,13 +130,13 @@ TEST(NetemRunnerTest, AppliesKernelProfileCollectsStatsThenDeletes) {
   ASSERT_TRUE(result.ok()) << result.error;
   ASSERT_EQ(executor.calls.size(), 6U);
   EXPECT_EQ(executor.calls[2],
-            (std::vector<std::string>{"ip", "netns", "exec",
-                                      "fkv-netem-9-0", "tc", "qdisc",
+            (std::vector<std::string>{"/usr/sbin/ip", "netns", "exec",
+                                      "fkv-netem-9-0", "/usr/sbin/tc", "qdisc",
                                       "replace", "dev", "lo", "root", "netem",
                                       "loss", "1%"}));
   EXPECT_EQ(executor.calls[4],
-            (std::vector<std::string>{"ip", "netns", "exec",
-                                      "fkv-netem-9-0", "tc", "-s", "qdisc",
+            (std::vector<std::string>{"/usr/sbin/ip", "netns", "exec",
+                                      "fkv-netem-9-0", "/usr/sbin/tc", "-s", "qdisc",
                                       "show", "dev", "lo"}));
   const auto timeout = std::ranges::find(executor.calls[3],
                                          "--request-timeout-ms");
@@ -160,7 +160,7 @@ TEST(NetemRunnerTest, SetupFailureDeletesOnlyAnOwnedNamespace) {
   EXPECT_FALSE(result.ok());
   ASSERT_EQ(executor.calls.size(), 3U);
   EXPECT_EQ(executor.calls.back(),
-            (std::vector<std::string>{"ip", "netns", "del",
+            (std::vector<std::string>{"/usr/sbin/ip", "netns", "del",
                                       "fkv-netem-7-0"}));
 
   FakeExecutor add_failure;
@@ -196,7 +196,7 @@ TEST(NetemRunnerTest, FailedProfileIsRecordedAndLaterProfilesStillRun) {
   EXPECT_FALSE(result.profiles[0].ok());
   EXPECT_TRUE(result.profiles[1].ok());
   EXPECT_EQ(executor.calls.back(),
-            (std::vector<std::string>{"ip", "netns", "del",
+            (std::vector<std::string>{"/usr/sbin/ip", "netns", "del",
                                       "fkv-netem-99-1"}));
 }
 
@@ -233,7 +233,7 @@ TEST(NetemRunnerTest, ExecutorExceptionAfterCreateStillDeletesNamespace) {
   EXPECT_FALSE(result.ok());
   ASSERT_EQ(executor.calls.size(), 3U);
   EXPECT_EQ(executor.calls.back(),
-            (std::vector<std::string>{"ip", "netns", "del",
+            (std::vector<std::string>{"/usr/sbin/ip", "netns", "del",
                                       "fkv-netem-44-0"}));
 }
 
@@ -258,6 +258,19 @@ TEST(ProcessRunnerTest, RejectsOutputBeyondConfiguredCap) {
   EXPECT_FALSE(result.ok());
   EXPECT_EQ(result.output.size(), 1024U);
   EXPECT_NE(result.error.find("output exceeds"), std::string::npos);
+}
+
+TEST(ProcessRunnerTest, StopsAnInfiniteWriterAtTheOutputCap) {
+  PosixCommandExecutor executor;
+  const auto started = std::chrono::steady_clock::now();
+  const auto result = executor.run(
+      {FORGEKV_SATURATING_WRITER_PATH},
+      CommandOptions{.timeout = 2s, .maximum_output_bytes = 1024U});
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  EXPECT_FALSE(result.ok());
+  EXPECT_EQ(result.output.size(), 1024U);
+  EXPECT_NE(result.error.find("output exceeds"), std::string::npos);
+  EXPECT_LT(elapsed, 1s);
 }
 
 }  // namespace
