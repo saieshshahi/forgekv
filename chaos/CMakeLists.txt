@@ -53,3 +53,11 @@ add_dependencies(forgekv_netem forgekv_chaos forgekv_server)
 add_test(NAME NetemCliHelp COMMAND forgekv_netem --help)
 add_test(NAME NetemCliRejectsInvalidBounds COMMAND forgekv_netem --nodes 4)
 set_tests_properties(NetemCliRejectsInvalidBounds PROPERTIES WILL_FAIL TRUE)
+add_test(NAME NetemCliRejectsDuplicateOptions
+  COMMAND forgekv_netem --nodes 3 --nodes 5)
+set_tests_properties(NetemCliRejectsDuplicateOptions PROPERTIES WILL_FAIL TRUE)
+add_test(NAME NetemCliRejectsUnknownProfile
+  COMMAND forgekv_netem --profile not-a-profile)
+set_tests_properties(NetemCliRejectsUnknownProfile PROPERTIES WILL_FAIL TRUE)
+add_test(NAME NetemCliRejectsMissingRequiredPaths COMMAND forgekv_netem)
+set_tests_properties(NetemCliRejectsMissingRequiredPaths PROPERTIES WILL_FAIL TRUE)

@@ -51,8 +51,9 @@ wsl -d Ubuntu -u root -- /mnt/c/path/to/forgekv/build/release/chaos/forgekv-nete
 ```
 
 The output directory must be absent or empty. `/`, the current repository root,
-a home directory, a symlink, a missing executable, an unknown profile, duplicate
-options, and non-root execution are rejected before any namespace is created.
+a home directory, any path with a symlinked component, a missing executable, an
+unknown profile, duplicate options, and non-root execution are rejected before
+any namespace is created.
 
 The default matrix contains `baseline`, `latency-10ms`, `latency-50ms`,
 `latency-100ms`, `loss-0.1pct`, `loss-1pct`, and `loss-5pct`. Select one or more
@@ -82,7 +83,9 @@ and retained in the evidence.
 
 The output root contains:
 
-- `environment.txt`: kernel and iproute2 versions, exact argv, and semantic label;
+- `environment.txt`: kernel, iproute2, CPU and compiler details, exact argv,
+  executable paths, SHA-256 identities for the runner/server/workload, and the
+  semantic label;
 - `results.jsonl`: one bounded machine-readable record per completed profile;
 - `summary.md`: attempts/second, acknowledged mutations/second, observed qdisc
   drops, convergence, and restart verification;
@@ -97,11 +100,14 @@ warm-up, repeated trials, variance, and saturation methodology.
 
 ## Limits
 
-The first implementation shapes all loopback traffic in the isolated namespace,
-including client, admin, proxy, and Raft connections. It does not yet separate
-traffic classes or apply asymmetric per-peer kernel rules. It also does not model
-bandwidth limits, duplication, corruption, MTU faults, or physical NIC queues.
-Those additions require evidence that their complexity answers a real question.
+The first implementation shapes all loopback traffic used by the stable run:
+client, admin, and direct Raft connections. Stable mode deliberately bypasses
+the Phase 14 application proxy so proxy queuing cannot multiply kernel delay or
+turn packet impairment into a second fault model. It does not yet separate
+traffic classes or apply asymmetric per-peer kernel rules. It also does not
+model bandwidth limits, duplication, corruption, MTU faults, or physical NIC
+queues. Those additions require evidence that their complexity answers a real
+question.
 
 ## Phase 15 measured evidence
 

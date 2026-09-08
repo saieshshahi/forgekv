@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <exception>
 #include <string>
 #include <utility>
 #include <vector>
@@ -39,6 +40,45 @@ std::uint64_t request_timeout_ms(const NetemProfile& profile) {
   }
   return std::min<std::uint64_t>(timeout, 10'000U);
 }
+
+class NamespaceGuard final {
+ public:
+  NamespaceGuard(CommandExecutor& executor, std::string name,
+                 CommandOptions cleanup_options)
+      : executor_(executor),
+        name_(std::move(name)),
+        cleanup_options_(std::move(cleanup_options)) {}
+
+  ~NamespaceGuard() { static_cast<void>(cleanup()); }
+
+  NamespaceGuard(const NamespaceGuard&) = delete;
+  NamespaceGuard& operator=(const NamespaceGuard&) = delete;
+
+  void take_ownership() noexcept { owns_namespace_ = true; }
+
+  [[nodiscard]] CommandResult cleanup() noexcept {
+    CommandResult result;
+    result.exit_code = 0;
+    if (!owns_namespace_) return result;
+    owns_namespace_ = false;
+    try {
+      return executor_.run({"ip", "netns", "del", name_}, cleanup_options_);
+    } catch (const std::exception& error) {
+      result.exit_code = -1;
+      result.error = std::string("namespace cleanup exception: ") + error.what();
+    } catch (...) {
+      result.exit_code = -1;
+      result.error = "namespace cleanup exception";
+    }
+    return result;
+  }
+
+ private:
+  CommandExecutor& executor_;
+  std::string name_;
+  CommandOptions cleanup_options_;
+  bool owns_namespace_{false};
+};
 
 }  // namespace
 
@@ -107,20 +147,11 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
       return matrix;
     }
 
-    bool owns_namespace = false;
-    auto cleanup = [&] {
-      if (!owns_namespace) {
-        CommandResult already_clean;
-        already_clean.exit_code = 0;
-        return already_clean;
-      }
-      owns_namespace = false;
-      return executor_.run({"ip", "netns", "del", namespace_name},
-                           lifecycle_options);
-    };
+    NamespaceGuard namespace_guard(executor_, namespace_name,
+                                   lifecycle_options);
     const auto fail = [&](const std::string& diagnostic) {
       profile_result.error = diagnostic;
-      const auto cleaned = cleanup();
+      const auto cleaned = namespace_guard.cleanup();
       if (!cleaned.ok()) {
         profile_result.error += "; " + command_failure("namespace cleanup",
                                                         cleaned);
@@ -129,14 +160,15 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
       if (matrix.error.empty()) matrix.error = matrix.profiles.back().error;
     };
 
-    const auto created = executor_.run(
-        {"ip", "netns", "add", namespace_name}, lifecycle_options);
+    try {
+      const auto created = executor_.run(
+          {"ip", "netns", "add", namespace_name}, lifecycle_options);
     if (!created.ok()) {
       fail(command_failure("namespace create", created));
       if (options.interrupted && options.interrupted()) return matrix;
       continue;
     }
-    owns_namespace = true;
+    namespace_guard.take_ownership();
     const auto loopback = executor_.run(
         in_namespace(namespace_name, {"ip", "link", "set", "lo", "up"}),
         setup_options);
@@ -206,16 +238,24 @@ NetemMatrixResult NetemRunner::run(const NetemRunnerOptions& options) {
       profile_result.qdisc = *stats.stats;
     }
 
-    const auto cleaned = cleanup();
+    const auto cleaned = namespace_guard.cleanup();
     if (!cleaned.ok()) {
       profile_result.error = command_failure("namespace cleanup", cleaned);
-    } else if (!workload_result.ok() || !profile_result.summary.passed) {
+    } else if (!workload_result.ok() ||
+               !profile_result.stable_contract_met()) {
       profile_result.error = command_failure("stable ForgeKV workload",
                                              workload_result);
     }
     matrix.profiles.push_back(std::move(profile_result));
     if (!matrix.profiles.back().ok()) {
       if (matrix.error.empty()) matrix.error = matrix.profiles.back().error;
+    }
+    } catch (const std::exception& error) {
+      fail(std::string("netem profile exception: ") + error.what());
+      if (options.interrupted && options.interrupted()) return matrix;
+    } catch (...) {
+      fail("netem profile exception");
+      if (options.interrupted && options.interrupted()) return matrix;
     }
   }
   return matrix;

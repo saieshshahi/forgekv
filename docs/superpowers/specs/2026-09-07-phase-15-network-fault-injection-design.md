@@ -61,10 +61,11 @@ through a documented root mechanism. For each profile it:
 6. removes the qdisc and namespace through an unconditional cleanup trap.
 
 The entire cluster is inside one namespace. Impairment therefore covers client,
-admin, proxy, and Raft traffic. This makes the measured effect an end-to-end
-service result. Per-directed-link fault composition remains the job of the
-Phase 14 proxy; kernel netem is intentionally node-agnostic in this first safe
-implementation.
+admin, and direct Raft traffic. Stable mode bypasses the Phase 14 proxy so its
+queueing and connection-reset behavior cannot multiply kernel delay or compose
+an unrequested second fault. This remains an end-to-end service result.
+Per-directed-link fault composition remains the job of the Phase 14 proxy;
+kernel netem is intentionally node-agnostic in this first safe implementation.
 
 ### Profiles and precision
 
@@ -108,7 +109,8 @@ substituting proxy behavior.
 
 The output root contains:
 
-- `environment.txt`: kernel, `tc`, `ip`, CPU, build, and exact invocation;
+- `environment.txt`: kernel, `tc`, `ip`, CPU, compiler, exact invocation, and
+  SHA-256 identities for the runner, server, and stable workload executables;
 - `results.jsonl`: one bounded record per profile;
 - `<profile>/`: the retained chaos artifacts and qdisc statistics;
 - `summary.md`: a compact human-readable table.

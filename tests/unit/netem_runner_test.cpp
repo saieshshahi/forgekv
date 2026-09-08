@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,6 +23,9 @@ class FakeExecutor final : public CommandExecutor {
   CommandResult run(const std::vector<std::string>& arguments,
                     const CommandOptions&) override {
     calls.push_back(arguments);
+    if (throw_on_call != 0U && calls.size() == throw_on_call) {
+      throw std::runtime_error("injected executor exception");
+    }
     if (results.empty()) {
       return {.exit_code = 0};
     }
@@ -32,6 +36,7 @@ class FakeExecutor final : public CommandExecutor {
 
   std::vector<std::vector<std::string>> calls;
   std::deque<CommandResult> results;
+  std::size_t throw_on_call{0U};
 };
 
 NetemRunnerOptions options(const std::filesystem::path& output,
@@ -195,6 +200,43 @@ TEST(NetemRunnerTest, FailedProfileIsRecordedAndLaterProfilesStillRun) {
                                       "fkv-netem-99-1"}));
 }
 
+TEST(NetemRunnerTest, ContradictoryPassingSummaryFailsTheProfile) {
+  FakeExecutor executor;
+  executor.results = {
+      CommandResult{.exit_code = 0},
+      CommandResult{.exit_code = 0},
+      CommandResult{
+          .exit_code = 0,
+          .output = "result=pass converged=false restart_verified=false "
+                    "attempts=50 acknowledged_writes=12 actions=1\n"},
+      CommandResult{.exit_code = 0},
+  };
+  NetemRunner runner(executor, 0U, 43U);
+  const auto result = runner.run(
+      options("/tmp/forgekv-netem-test", NetemProfile{.name = "baseline"}));
+  EXPECT_FALSE(result.ok());
+  ASSERT_EQ(result.profiles.size(), 1U);
+  EXPECT_FALSE(result.profiles.front().ok());
+  EXPECT_NE(result.error.find("stable ForgeKV workload"), std::string::npos);
+}
+
+TEST(NetemRunnerTest, ExecutorExceptionAfterCreateStillDeletesNamespace) {
+  FakeExecutor executor;
+  executor.results = {
+      CommandResult{.exit_code = 0},
+      CommandResult{.exit_code = 0},
+  };
+  executor.throw_on_call = 2U;
+  NetemRunner runner(executor, 0U, 44U);
+  const auto result = runner.run(
+      options("/tmp/forgekv-netem-test", NetemProfile{.name = "baseline"}));
+  EXPECT_FALSE(result.ok());
+  ASSERT_EQ(executor.calls.size(), 3U);
+  EXPECT_EQ(executor.calls.back(),
+            (std::vector<std::string>{"ip", "netns", "del",
+                                      "fkv-netem-44-0"}));
+}
+
 TEST(ProcessRunnerTest, CapturesOutputAndEnforcesTimeout) {
   PosixCommandExecutor executor;
   const auto echo = executor.run({"/bin/echo", "forgekv-netem"},
@@ -206,6 +248,16 @@ TEST(ProcessRunnerTest, CapturesOutputAndEnforcesTimeout) {
                                  CommandOptions{.timeout = 20ms});
   EXPECT_FALSE(slow.ok());
   EXPECT_TRUE(slow.timed_out);
+}
+
+TEST(ProcessRunnerTest, RejectsOutputBeyondConfiguredCap) {
+  PosixCommandExecutor executor;
+  const auto result = executor.run(
+      {"/usr/bin/head", "-c", "4096", "/dev/zero"},
+      CommandOptions{.timeout = 1s, .maximum_output_bytes = 1024U});
+  EXPECT_FALSE(result.ok());
+  EXPECT_EQ(result.output.size(), 1024U);
+  EXPECT_NE(result.error.find("output exceeds"), std::string::npos);
 }
 
 }  // namespace

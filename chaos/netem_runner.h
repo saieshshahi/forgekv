@@ -35,8 +35,12 @@ struct NetemProfileResult final {
   std::string workload_output;
   std::string qdisc_output;
   std::string error;
+  [[nodiscard]] bool stable_contract_met() const noexcept {
+    return summary.passed && summary.actions == 0U && summary.converged &&
+           summary.restart_verified;
+  }
   [[nodiscard]] bool ok() const noexcept {
-    return error.empty() && workload_exit_code == 0 && summary.passed;
+    return error.empty() && workload_exit_code == 0 && stable_contract_met();
   }
 };
 

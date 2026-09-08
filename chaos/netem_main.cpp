@@ -2,8 +2,10 @@
 #include "chaos/netem_runner.h"
 #include "chaos/process_runner.h"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cctype>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -196,6 +198,43 @@ std::string cpu_description() {
   return "cpu_model=unavailable\n";
 }
 
+void reject_symlinked_components(const std::filesystem::path& path) {
+  std::filesystem::path current;
+  for (const auto& component : path) {
+    current /= component;
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(current, error);
+    if (error == std::errc::no_such_file_or_directory) return;
+    if (error) {
+      throw std::invalid_argument("cannot inspect artifacts path");
+    }
+    if (std::filesystem::is_symlink(status)) {
+      throw std::invalid_argument(
+          "artifacts path must not contain a symlink component");
+    }
+    if (!std::filesystem::exists(status)) return;
+  }
+}
+
+std::string executable_sha256(forgekv::chaos::CommandExecutor& executor,
+                              const std::filesystem::path& path,
+                              const std::string_view label) {
+  const auto result = executor.run({"sha256sum", "--", path.string()}, {});
+  const auto separator = result.output.find_first_of(" \t\r\n");
+  const auto hash = result.output.substr(0U, separator);
+  const auto hexadecimal = hash.size() == 64U &&
+                           std::ranges::all_of(hash, [](const char character) {
+                             return std::isxdigit(
+                                        static_cast<unsigned char>(character)) !=
+                                    0;
+                           });
+  if (!result.ok() || !hexadecimal) {
+    throw std::runtime_error("cannot identify " + std::string(label) +
+                             " executable build");
+  }
+  return std::string(label) + "_sha256=" + hash + "\n";
+}
+
 std::filesystem::path validate_paths(NetemRunnerOptions& options) {
   std::error_code error;
   options.chaos_path = std::filesystem::canonical(options.chaos_path, error);
@@ -214,6 +253,7 @@ std::filesystem::path validate_paths(NetemRunnerOptions& options) {
       output == std::filesystem::current_path()) {
     throw std::invalid_argument("unsafe artifacts path");
   }
+  reject_symlinked_components(output);
   if (const auto* home = std::getenv("HOME"); home != nullptr &&
       output == std::filesystem::path(home).lexically_normal()) {
     throw std::invalid_argument("artifacts path must not be a home directory");
@@ -283,7 +323,8 @@ int main(const int argc, char** argv) {
     const auto tc = executor.run({"tc", "-V"}, {});
     const auto ip = executor.run({"ip", "-V"}, {});
     if (!uname.ok() || !tc.ok() || !ip.ok()) {
-      throw std::runtime_error("required uname/ip/tc tools are unavailable");
+      throw std::runtime_error(
+          "required uname/ip/tc tools are unavailable");
     }
     std::string invocation{"invocation_argv=["};
     for (int index = 0; index < argc; ++index) {
@@ -293,6 +334,10 @@ int main(const int argc, char** argv) {
     invocation += "]\n";
     const auto environment =
         uname.output + tc.output + ip.output + cpu_description() +
+        "compiler=" + std::string(__VERSION__) + "\n" +
+        executable_sha256(executor, "/proc/self/exe", "netem") +
+        executable_sha256(executor, parsed.options.chaos_path, "chaos") +
+        executable_sha256(executor, parsed.options.server_path, "server") +
         "logical_cpus=" + std::to_string(std::thread::hardware_concurrency()) +
         "\nchaos_path=" + parsed.options.chaos_path.string() +
         "\nserver_path=" + parsed.options.server_path.string() + "\n" +
