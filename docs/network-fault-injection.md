@@ -119,19 +119,21 @@ complete restart, removed its namespace, and left default-namespace loopback at
 
 | Profile | Attempts/s | Ack mutations/s | Netem packets | Netem drops |
 | --- | ---: | ---: | ---: | ---: |
-| baseline | 97 | 70 | 0 | 0 |
-| latency-10ms | 58 | 42 | 4,862 | 0 |
-| latency-50ms | 20 | 4 | 3,452 | 0 |
-| latency-100ms | 15 | 2 | 4,245 | 0 |
-| loss-0.1pct | 108 | 79 | 18,082 | 20 |
-| loss-1pct | 56 | 40 | 7,294 | 79 |
-| loss-5pct | 29 | 20 | 3,769 | 189 |
+| baseline | 45 | 32 | 0 | 0 |
+| latency-10ms | 46 | 32 | 4,376 | 0 |
+| latency-50ms | 17 | 4 | 3,345 | 0 |
+| latency-100ms | 12 | 4 | 3,188 | 0 |
+| loss-0.1pct | 44 | 31 | 8,397 | 11 |
+| loss-1pct | 36 | 25 | 4,961 | 60 |
+| loss-5pct | 24 | 15 | 2,889 | 142 |
 
-The non-monotonic 0.1% throughput result illustrates why this is not a benchmark:
-each profile is one short trial with no warm-up or variance estimate. Phase 16
-will correct that methodology. The meaningful Phase 15 evidence is that the
-kernel installed each profile, observed the expected order of loss, and ForgeKV
-preserved the checked guarantees.
+The small latency-10ms/baseline inversion illustrates why this is not a
+benchmark: each profile is one short trial with no warm-up or variance estimate.
+Phase 16 will correct that methodology. The meaningful Phase 15 evidence is that
+the kernel installed each profile, observed the expected order of loss, and
+ForgeKV preserved the checked guarantees. This final matrix was regenerated
+from the optimized post-review build; `environment.txt` binds it to the exact
+runner, chaos workload, and server binaries with SHA-256 identities.
 
 Separate two-second, 3-node, 4-client smoke runs with seed 150016 verified the
 additional behaviors. The kernel reported `delay 10ms 5ms` for `jitter-smoke`
