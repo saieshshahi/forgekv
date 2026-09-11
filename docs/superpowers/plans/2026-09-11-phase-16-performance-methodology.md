@@ -43,7 +43,7 @@
 - Produces: `class OperationSelector { Operation next() noexcept; };` with deterministic counter-based selection.
 - Produces: `class LatencyHistogram` with `observe(std::chrono::microseconds)`, `merge(const LatencyHistogram&)`, `std::optional<std::chrono::microseconds> quantile(double)`, `count()`, `maximum()`, and `overflow_count()`.
 
-- [ ] **Step 1: Write scenario and determinism tests**
+- [x] **Step 1: Write scenario and determinism tests**
 
 Add tests that require the exact 300-scenario cluster matrix, reject mixed scope/durability labels, and prove the first 1,000 operations for a 95/5 selector contain exactly 950 reads and 50 writes and repeat for the same seed.
 
@@ -63,17 +63,17 @@ TEST(BenchmarkScenarioTest, SelectorRealizesExactMixPerThousand) {
 }
 ```
 
-- [ ] **Step 2: Run the tests and observe the missing benchmark interfaces**
+- [x] **Step 2: Run the tests and observe the missing benchmark interfaces**
 
 Run: `cmake --build build/debug -j2 && build/debug/tests/forgekv_unit_tests --gtest_filter='BenchmarkScenarioTest.*:LatencyHistogramTest.*'`
 
 Expected: compilation fails because `bench/system/workload.h` and histogram types do not exist.
 
-- [ ] **Step 3: Implement validation, canonical IDs, and deterministic selection**
+- [x] **Step 3: Implement validation, canonical IDs, and deterministic selection**
 
 Use fixed arrays for the required matrix, reject zero/unsupported sizes and durations, cap concurrency at 256, require percentages sum to 100, require cluster scope to use `quorum_sync`, and require storage scope to use one of the three standalone modes. Canonical IDs include every semantic field and contain only `[a-z0-9-]`.
 
-- [ ] **Step 4: Add histogram boundary, merge, accuracy, and overflow tests**
+- [x] **Step 4: Add histogram boundary, merge, accuracy, and overflow tests**
 
 ```cpp
 TEST(LatencyHistogramTest, MergesWithBoundedQuantileError) {
@@ -90,13 +90,13 @@ TEST(LatencyHistogramTest, MergesWithBoundedQuantileError) {
 
 Implement fixed logarithmic buckets spanning 1 microsecond to 60 seconds with sub-buckets that bound quantile error to one percent. Saturate counters safely and record underflow/overflow instead of indexing outside the array.
 
-- [ ] **Step 5: Run focused and full unit tests**
+- [x] **Step 5: Run focused and full unit tests**
 
 Run the focused filter above, then `ctest --test-dir build/debug --output-on-failure -R 'Benchmark|Latency|Raft|Storage'`.
 
 Expected: all selected tests pass.
 
-- [ ] **Step 6: Commit and push**
+- [x] **Step 6: Commit and push**
 
 ```bash
 git add bench/system tests/unit/benchmark_workload_test.cpp bench/CMakeLists.txt tests/CMakeLists.txt

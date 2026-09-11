@@ -14,12 +14,12 @@ endif()
 add_subdirectory(src)
 add_subdirectory(chaos)
 
-if(FORGEKV_BUILD_TESTS)
-  add_subdirectory(tests)
+if(FORGEKV_BUILD_BENCHMARKS OR FORGEKV_BUILD_TESTS)
+  add_subdirectory(bench)
 endif()
 
-if(FORGEKV_BUILD_BENCHMARKS)
-  add_subdirectory(bench)
+if(FORGEKV_BUILD_TESTS)
+  add_subdirectory(tests)
 endif()
 
 if(FORGEKV_BUILD_FUZZERS)

@@ -3,6 +3,7 @@ include(GoogleTest)
 add_executable(forgekv_saturating_writer helpers/saturating_writer.cpp)
 
 add_executable(forgekv_unit_tests
+  unit/benchmark_workload_test.cpp
   unit/cluster_codecs_test.cpp
   unit/chaos_client_state_test.cpp
   unit/chaos_process_cluster_test.cpp
@@ -32,6 +33,7 @@ add_executable(forgekv_unit_tests
   unit/wal_record_test.cpp
 )
 target_link_libraries(forgekv_unit_tests PRIVATE
+  forgekv_benchmark_core
   forgekv_common
   forgekv_cluster
   forgekv_chaos_core
