@@ -237,7 +237,8 @@ TEST(NetemIntegrationTest, CliFailsIfWorkloadExecutableChangesDuringRun) {
     result = executor.run(
         {FORGEKV_NETEM_PATH, "--chaos", chaos_copy.string(), "--server",
          FORGEKV_SERVER_PATH, "--artifacts", output.string(), "--clients", "1",
-         "--duration", "1", "--profile", "baseline"},
+         "--duration", "1", "--profile", "baseline", "--profile",
+         "latency-10ms"},
         CommandOptions{.timeout = 30s});
   });
   const auto children = output / "baseline" / "children.txt";
@@ -271,6 +272,18 @@ TEST(NetemIntegrationTest, CliFailsIfWorkloadExecutableChangesDuringRun) {
   EXPECT_NE(result->output.find("executable identity changed"),
             std::string::npos)
       << result->output;
+  std::ifstream records(output / "results.jsonl");
+  ASSERT_TRUE(records.is_open());
+  const std::string evidence((std::istreambuf_iterator<char>(records)),
+                             std::istreambuf_iterator<char>());
+  std::size_t invalid_profiles = 0U;
+  std::size_t offset = 0U;
+  while ((offset = evidence.find("\"passed\":false", offset)) !=
+         std::string::npos) {
+    ++invalid_profiles;
+    ++offset;
+  }
+  EXPECT_EQ(invalid_profiles, 2U) << evidence;
 }
 
 }  // namespace

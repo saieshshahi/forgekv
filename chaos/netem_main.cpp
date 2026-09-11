@@ -407,16 +407,18 @@ int main(const int argc, char** argv) {
           std::string(error.what());
     }
     if (!identity_error.empty()) {
-      if (matrix.error.empty()) matrix.error = identity_error;
-      if (!matrix.profiles.empty() && matrix.profiles.back().error.empty()) {
-        matrix.profiles.back().error = identity_error;
+      if (!matrix.error.empty()) matrix.error += "; ";
+      matrix.error += identity_error;
+      for (auto& profile : matrix.profiles) {
+        if (!profile.error.empty()) profile.error += "; ";
+        profile.error += identity_error;
       }
     }
     std::string jsonl;
     std::string markdown =
         "# ForgeKV netem matrix\n\n"
-        "| Profile | Attempts/s | Ack mutations/s | Drops | Converged | Restart |\n"
-        "| --- | ---: | ---: | ---: | --- | --- |\n";
+        "| Profile | Attempts/s | Ack mutations/s | Drops | Converged | Restart | Valid |\n"
+        "| --- | ---: | ---: | ---: | --- | --- | --- |\n";
     for (const auto& result : matrix.profiles) {
       jsonl += result_json(result, parsed.options);
       const auto seconds = static_cast<std::uint64_t>(parsed.options.duration.count());
@@ -425,7 +427,8 @@ int main(const int argc, char** argv) {
                   std::to_string(result.summary.acknowledged_writes / seconds) +
                   " | " + std::to_string(result.qdisc.dropped) + " | " +
                   (result.summary.converged ? "yes" : "no") + " | " +
-                  (result.summary.restart_verified ? "yes" : "no") + " |\n";
+                  (result.summary.restart_verified ? "yes" : "no") + " | " +
+                  (result.ok() ? "yes" : "no") + " |\n";
       const auto profile_directory = output / result.profile.name;
       std::error_code directory_error;
       std::filesystem::create_directories(profile_directory, directory_error);

@@ -165,11 +165,11 @@ CMake/CTest, GoogleTest, JSONL/Markdown evidence.
 
 ## Execution evidence
 
-- Tasks 1–6 are complete. Stable mode, profile validation, bounded direct
+- Tasks 1–7 are complete. Stable mode, profile validation, bounded direct
   process execution, namespace ownership/cleanup, the experiment CLI, atomic
   evidence, semantic documentation, and real-kernel regressions are implemented.
 - The required release matrix passed all seven profiles with 3 nodes, 8 clients,
-  three traffic seconds, and seed 150015. Netem observed 20, 79, and 189 drops at
+  three traffic seconds, and seed 150015. Netem observed 12, 71, and 205 drops at
   0.1%, 1%, and 5%; every profile converged and verified a complete restart.
 - Real jitter and reordering smoke profiles passed. Their qdisc descriptions were
   `delay 10ms 5ms` and `delay 10ms reorder 1% 25%`.
@@ -178,5 +178,16 @@ CMake/CTest, GoogleTest, JSONL/Markdown evidence.
   The second exposed a one-shot metrics scrape under 5% loss; evidence collection
   now retries within the existing overall deadline. Both endpoints are permanent
   privileged regressions.
-- Task 7 remains in progress until all debug/release/sanitizer gates and two
-  independent reviews are green.
+- The final tree passed 265/265 tests in both debug and release, then 265/265
+  under each of ASan, UBSan, and TSan. One ASan chaos timing assertion missed an
+  action while all three sanitizer suites competed concurrently; the focused
+  test and the complete isolated ASan rerun passed.
+- All seven privileged `NetemIntegrationTest` cases passed in 71.0 seconds on
+  the final code. They include 100 ms latency, 5% loss, SIGTERM cleanup,
+  symlink/writable-parent rejection, exact executable identity, hostile `PATH`,
+  and matrix-wide invalidation after executable replacement.
+- The final `/root/forgekv-phase15-netem-f904d94` evidence matched all documented
+  values and executable hashes. No `fkv-netem-*` namespace remained, and host
+  loopback remained `noqueue`.
+- Independent correctness/safety and requirements reviews both returned GO with
+  no remaining concrete P0, P1, or evidence-backed P2 gaps.

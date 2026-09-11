@@ -59,6 +59,11 @@ root, a home directory, any symlinked component, a missing executable, an
 unknown profile, duplicate options, and non-root execution are rejected before
 any namespace is created.
 
+`forgekv-netem` is a privileged test runner, not a security sandbox. A network
+namespace isolates network state; it does not isolate the filesystem or remove
+root privileges from the supplied server and workload executables. Run only
+trusted binaries on a dedicated development host or disposable VM/WSL instance.
+
 The default matrix contains `baseline`, `latency-10ms`, `latency-50ms`,
 `latency-100ms`, `loss-0.1pct`, `loss-1pct`, and `loss-5pct`. Select one or more
 profiles with repeatable `--profile NAME`. `jitter-smoke` and `reorder-smoke`
@@ -104,6 +109,12 @@ state under that configured impairment. This quick matrix is behavioral
 evidence, not a statistically controlled performance benchmark; Phase 16 owns
 warm-up, repeated trials, variance, and saturation methodology.
 
+Executable identities are sampled before and after the matrix. A persistent
+path replacement or unreadable binary invalidates every profile record. This is
+an evidence-integrity check for the documented trusted-host workflow, not inode
+pinning: it does not defend against a privileged actor temporarily replacing an
+executable and restoring it between the two samples.
+
 ## Limits
 
 The first implementation shapes all loopback traffic used by the stable run:
@@ -125,20 +136,21 @@ complete restart, removed its namespace, and left default-namespace loopback at
 
 | Profile | Attempts/s | Ack mutations/s | Netem packets | Netem drops |
 | --- | ---: | ---: | ---: | ---: |
-| baseline | 45 | 32 | 0 | 0 |
-| latency-10ms | 46 | 32 | 4,376 | 0 |
-| latency-50ms | 17 | 4 | 3,345 | 0 |
-| latency-100ms | 12 | 4 | 3,188 | 0 |
-| loss-0.1pct | 44 | 31 | 8,397 | 11 |
-| loss-1pct | 36 | 25 | 4,961 | 60 |
-| loss-5pct | 24 | 15 | 2,889 | 142 |
+| baseline | 119 | 87 | 0 | 0 |
+| latency-10ms | 46 | 33 | 4,376 | 0 |
+| latency-50ms | 19 | 3 | 3,362 | 0 |
+| latency-100ms | 15 | 2 | 4,249 | 0 |
+| loss-0.1pct | 119 | 87 | 12,586 | 12 |
+| loss-1pct | 78 | 56 | 7,144 | 71 |
+| loss-5pct | 34 | 23 | 4,266 | 205 |
 
-The small latency-10ms/baseline inversion illustrates why this is not a
-benchmark: each profile is one short trial with no warm-up or variance estimate.
+The single short trials vary sharply with profile and include no warm-up or
+variance estimate, so they are not a benchmark.
 Phase 16 will correct that methodology. The meaningful Phase 15 evidence is that
 the kernel installed each profile, observed the expected order of loss, and
 ForgeKV preserved the checked guarantees. This final matrix was regenerated
-from the optimized post-review build; `environment.txt` binds it to the exact
+from hardened commit `f904d94` into the private root-owned directory
+`/root/forgekv-phase15-netem-f904d94`. `environment.txt` binds it to the exact
 runner, chaos workload, and server binaries with SHA-256 identities.
 
 Separate two-second, 3-node, 4-client smoke runs with seed 150016 verified the
