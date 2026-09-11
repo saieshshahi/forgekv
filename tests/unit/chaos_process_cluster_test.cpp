@@ -1,4 +1,6 @@
+#include "bench/system/metrics_sampler.h"
 #include "chaos/process_cluster.h"
+#include "chaos/verifier.h"
 
 #include <unistd.h>
 
@@ -95,6 +97,41 @@ TEST(ProcessClusterTest, OwnsPauseKillRestartAndBoundedStop) {
   EXPECT_EQ(cluster.state(1U), NodeState::dead);
   EXPECT_EQ(cluster.state(2U), NodeState::dead);
   EXPECT_EQ(cluster.state(3U), NodeState::dead);
+}
+
+TEST(ProcessClusterTest, OwnsARealSingleVoterCluster) {
+  ClusterDirectory directory;
+  auto config = test_config(directory.path());
+  config.node_count = 1U;
+  ProcessCluster cluster(std::move(config));
+  ASSERT_TRUE(cluster.prepare().ok());
+  ASSERT_TRUE(cluster.start_all().ok());
+  EXPECT_GT(cluster.process_id(1U), 0);
+  EXPECT_EQ(cluster.refresh().nodes.size(), 1U);
+  const auto converged = wait_for_convergence(
+      {{.node = 1U, .port = cluster.admin_port(1U)}},
+      std::chrono::steady_clock::now() + std::chrono::seconds(5));
+  ASSERT_TRUE(converged.ok()) << converged.error;
+  ASSERT_EQ(converged.views.size(), 1U);
+  EXPECT_TRUE(converged.views.front().ready);
+  EXPECT_EQ(converged.views.front().role, ObservedRole::leader);
+  const benchmarking::NodeEndpoint endpoint{
+      .node = 1U,
+      .process_id = cluster.process_id(1U),
+      .admin_port = cluster.admin_port(1U)};
+  const auto metrics = benchmarking::MetricsSampler{}.sample({&endpoint, 1U});
+  ASSERT_TRUE(metrics.ok()) << metrics.error;
+  ASSERT_EQ(metrics.samples.size(), 1U);
+  EXPECT_EQ(metrics.samples.front().role, "leader");
+  EXPECT_TRUE(metrics.samples.front().process.cpu_seconds.has_value());
+  EXPECT_TRUE(metrics.samples.front().process.rss_bytes.has_value());
+  EXPECT_TRUE(metrics.samples.front().process.open_fds.has_value());
+  EXPECT_TRUE(metrics.samples.front().process.threads.has_value());
+  EXPECT_TRUE(metrics.samples.front().process.read_bytes.has_value());
+  EXPECT_TRUE(metrics.samples.front().process.write_bytes.has_value());
+  EXPECT_TRUE(metrics.samples.front().metric("forgekv_queue_depth").has_value());
+  ASSERT_TRUE(cluster.stop_all().ok());
+  EXPECT_EQ(cluster.state(1U), NodeState::dead);
 }
 
 TEST(ProcessClusterTest, RejectsInvalidLifecycleTransitions) {

@@ -3,6 +3,7 @@ include(GoogleTest)
 add_executable(forgekv_saturating_writer helpers/saturating_writer.cpp)
 
 add_executable(forgekv_unit_tests
+  unit/benchmark_metrics_test.cpp
   unit/benchmark_workload_test.cpp
   unit/cluster_codecs_test.cpp
   unit/chaos_client_state_test.cpp

@@ -32,6 +32,12 @@ RaftConfig five_node_config(const NodeId self_id = 1,
   return result;
 }
 
+RaftConfig single_node_config() {
+  auto result = config();
+  result.voters = {1};
+  return result;
+}
+
 Actions trigger_election(RaftNode& node) {
   return node.advance_time(node.snapshot().election_deadline);
 }
@@ -114,6 +120,28 @@ TEST(RaftNodeStatus, ReportsScalarsWithoutCopyingTheRetainedLog) {
   EXPECT_EQ(leader.retained_log_records, 1U);
   ASSERT_TRUE(node.match_index(2).has_value());
   EXPECT_EQ(*node.match_index(2), 0U);
+}
+
+TEST(RaftElection, SingleVoterElectsAndCommitsWithoutRemoteResponses) {
+  RaftNode node(single_node_config());
+
+  const auto election = trigger_election(node);
+  EXPECT_EQ(node.status().role, Role::leader);
+  EXPECT_EQ(node.status().leader_id, 1U);
+  EXPECT_EQ(node.status().commit_index, 1U);
+  EXPECT_EQ(node.status().last_applied, 1U);
+  EXPECT_EQ(actions_of<SendMessage>(election).size(), 0U);
+  EXPECT_EQ(actions_of<PersistHardState>(election).size(), 1U);
+  EXPECT_EQ(actions_of<PersistLog>(election).size(), 1U);
+  EXPECT_EQ(actions_of<CommitAdvanced>(election).size(), 1U);
+  EXPECT_EQ(actions_of<ApplyEntry>(election).size(), 1U);
+
+  const auto proposal = node.propose({std::byte{0x42}});
+  EXPECT_EQ(node.status().commit_index, 2U);
+  EXPECT_EQ(node.status().last_applied, 2U);
+  EXPECT_EQ(actions_of<PersistLog>(proposal).size(), 1U);
+  EXPECT_EQ(actions_of<CommitAdvanced>(proposal).size(), 1U);
+  EXPECT_EQ(actions_of<ApplyEntry>(proposal).size(), 1U);
 }
 
 TEST(RaftElection, TerminalTermCannotWrapOnElection) {

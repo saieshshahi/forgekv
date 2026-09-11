@@ -123,7 +123,7 @@ git push origin main
 - Produces: `struct ProcessSample`, `struct NodeSample`, `struct SampleSeries`, and `struct SampleResult { NodeSample sample; std::string error; bool ok() const noexcept; };`.
 - Produces: `parse_proc_status(std::string_view, ProcessSample&) -> std::optional<std::string>`, `parse_proc_io(std::string_view, ProcessSample&) -> std::optional<std::string>`, `parse_prometheus(std::string_view, NodeSample&) -> std::optional<std::string>`, and `MetricsSampler::sample(std::span<const NodeEndpoint>) -> SampleResult`.
 
-- [ ] **Step 1: Add a failing one-node lifecycle test**
+- [x] **Step 1: Add a failing one-node lifecycle test**
 
 ```cpp
 TEST(ProcessClusterTest, OwnsARealSingleVoterCluster) {
@@ -140,13 +140,13 @@ TEST(ProcessClusterTest, OwnsARealSingleVoterCluster) {
 
 Run the focused test and confirm construction currently rejects node count one.
 
-- [ ] **Step 2: Permit exactly 1, 3, or 5 nodes**
+- [x] **Step 2: Permit exactly 1, 3, or 5 nodes**
 
 Change the constructor guard only. Retain unique endpoint allocation, fixed
 membership generation, process ownership, and bounded stop semantics. Run all
 `ProcessClusterTest.*` and a real one-node health/readiness smoke test.
 
-- [ ] **Step 3: Add strict parser tests for `/proc` and Prometheus samples**
+- [x] **Step 3: Add strict parser tests for `/proc` and Prometheus samples**
 
 Tests cover whitespace, reordered fields, duplicate metric names, NaN/Inf,
 negative values, missing optional fields, counter regression, overflow, unknown
@@ -160,7 +160,7 @@ ASSERT_TRUE(sample.ok());
 EXPECT_EQ(sample.rss_bytes, 2U * 1024U * 1024U);
 ```
 
-- [ ] **Step 4: Implement bounded sampling and delta computation**
+- [x] **Step 4: Implement bounded sampling and delta computation**
 
 Read `/proc/<pid>/stat`, `/status`, and `/io` with 64 KiB caps. Fetch `/metrics`
 through the existing bounded admin HTTP helper. Preserve unavailable values as
@@ -168,12 +168,12 @@ through the existing bounded admin HTTP helper. Preserve unavailable values as
 and cumulative counters did not regress. Aggregate leader/follower/cluster
 values without losing per-node samples.
 
-- [ ] **Step 5: Verify focused tests and sanitizers**
+- [x] **Step 5: Verify focused tests and sanitizers**
 
 Run `BenchmarkMetricsTest.*`, `ProcessClusterTest.*`, ASan focused tests, and
 UBSan focused tests. Expected: all pass and a stopped cluster leaves no child.
 
-- [ ] **Step 6: Commit and push**
+- [x] **Step 6: Commit and push**
 
 ```bash
 git add chaos/process_cluster.cpp bench/system/metrics_sampler.* tests/unit/chaos_process_cluster_test.cpp tests/unit/benchmark_metrics_test.cpp bench/CMakeLists.txt tests/CMakeLists.txt

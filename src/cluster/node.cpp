@@ -818,9 +818,9 @@ class ClusterNode::Impl final {
       }
       ids.push_back(peer.node_id);
     }
-    if (ids.size() < 3U || ids.size() > 7U || ids.size() % 2U == 0U ||
+    if (ids.empty() || ids.size() > 7U || ids.size() % 2U == 0U ||
         std::ranges::find(ids, config_.node_id) == ids.end()) {
-      return "membership must be odd, at least three, and include self";
+      return "membership must contain 1, 3, 5, or 7 voters and include self";
     }
     if (config_.heartbeat_interval >= config_.election_timeout_min ||
         config_.election_timeout_min > config_.election_timeout_max) {

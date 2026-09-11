@@ -16,9 +16,9 @@ constexpr std::size_t kMaximumTrackedRpcsPerPeer = 64U;
 constexpr std::size_t kSnapshotChunkSize = 1024U * 1024U;
 
 void validate_config_impl(const RaftConfig& config) {
-  if (config.voters.size() < 3 || config.voters.size() > 7 ||
+  if (config.voters.empty() || config.voters.size() > 7 ||
       config.voters.size() % 2 == 0) {
-    throw std::invalid_argument("Raft requires 3, 5, or 7 voters");
+    throw std::invalid_argument("Raft requires 1, 3, 5, or 7 voters");
   }
   std::unordered_set<NodeId> unique;
   for (const auto voter : config.voters) {
@@ -407,6 +407,7 @@ struct RaftNode::Impl final {
         .leader_id = leader_id,
     });
     append_local_entry(EntryKind::no_op, {});
+    static_cast<void>(advance_leader_commit());
     broadcast_append_entries();
   }
 
@@ -446,6 +447,9 @@ struct RaftNode::Impl final {
       if (voter != config.self_id) {
         actions.push_back(SendMessage{.to = voter, .message = request});
       }
+    }
+    if (votes_received.size() >= quorum()) {
+      become_leader();
     }
   }
 
@@ -948,6 +952,7 @@ Actions RaftNode::propose(std::vector<std::byte> command) {
     impl_->actions.push_back(ProposalRejected{.leader_id = impl_->leader_id});
   } else {
     impl_->append_local_entry(EntryKind::command, std::move(command));
+    static_cast<void>(impl_->advance_leader_commit());
     impl_->broadcast_append_entries();
   }
   impl_->verify_invariants();
@@ -960,6 +965,7 @@ Actions RaftNode::read_barrier() {
     impl_->actions.push_back(ProposalRejected{.leader_id = impl_->leader_id});
   } else {
     impl_->append_local_entry(EntryKind::no_op, {});
+    static_cast<void>(impl_->advance_leader_commit());
     impl_->broadcast_append_entries();
   }
   impl_->verify_invariants();

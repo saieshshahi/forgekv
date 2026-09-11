@@ -56,7 +56,8 @@ std::string signal_error(const char* action) {
 class ProcessCluster::Impl final {
  public:
   explicit Impl(ProcessClusterConfig config) : config_(std::move(config)) {
-    if ((config_.node_count != 3U && config_.node_count != 5U) ||
+    if ((config_.node_count != 1U && config_.node_count != 3U &&
+         config_.node_count != 5U) ||
         config_.cluster_id == 0U || config_.server_path.empty() ||
         config_.root_directory.empty() || config_.shutdown_grace.count() <= 0) {
       throw std::invalid_argument("invalid process cluster configuration");

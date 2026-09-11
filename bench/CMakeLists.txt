@@ -1,9 +1,10 @@
 add_library(forgekv_benchmark_core
   system/latency_histogram.cpp
+  system/metrics_sampler.cpp
   system/workload.cpp
 )
 target_include_directories(forgekv_benchmark_core PUBLIC ${PROJECT_SOURCE_DIR})
-target_link_libraries(forgekv_benchmark_core PUBLIC forgekv_common)
+target_link_libraries(forgekv_benchmark_core PUBLIC forgekv_common PRIVATE forgekv_chaos_core)
 
 if(FORGEKV_BUILD_BENCHMARKS)
   add_executable(forgekv_benchmarks
